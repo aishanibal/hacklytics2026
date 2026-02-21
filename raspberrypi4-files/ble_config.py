@@ -28,14 +28,15 @@ async def scan():
                 rssi = device.rssi
                 distance = estimate_distance(rssi)
 
-                print("TARGET FOUND")
-                print("MAC:", device.address)
-                print("RSSI:", rssi)
-                print(f"Estimated Distance: {distance:.2f} meters\n")
+                results.append({
+                    "UUID": TARGET_UUID,
+                    "address": device.address,
+                    "distance": distance
+                })
 
                 found = True
 
         if not found:
             print("Target not detected\n")
 
-asyncio.run(scan())
+

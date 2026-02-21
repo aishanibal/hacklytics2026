@@ -1,34 +1,50 @@
 from fastapi import FastAPI, Response
 from fastapi.middleware.cors import CORSMiddleware
 import cv2
+import asyncio
+from ble_config import scan
+import json
+from fastapi.responses import StreamingResponse, JSONResponse
+import uvicorn
 
 app = FastAPI()
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"]
-)
+cap = cv2.VideoCapture(0)
+cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 880)
+cap.set(cv2.CAP_PROP_FPS, 15)
 
-camera = cv2.VideoCapture(0)
-if not camera.isOpened():
-    raise RunTimeError("Could not start camera")
+@app.route('/video-stream')
+async def video(request):
+    async def frame_stream():
+        while True:
+            ret, frame = cap.read()
+            if not ret:
+                await asyncio.sleep(0.01)
+                continue
+            
+            _, jpeg = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 70])
+            
+            yield b'--frame\r\nContent-Type: image/jpeg\r\n\r\n' + jpeg.tobytes() + b'\r\n'
+            
+            await asyncio.sleep(0.01)
+        
+    try:
+        return StreamingResponse(frame_stream(), media_type='multipart/x-mixed-replace; boundary=frame')
+    except Exception as e:
+        return {"error": str(e)}
 
-@app.get("/get-frame")
-def generate_frames():
-    success, frame = camera.read()
-    if not success:
-        return {"error": "failed to capture"}
-    ret, buffer = cv2.imencode('.jpg', frame)
-    if not ret:
-        return {"error": "Failed to encode"}
-    frame_bytes = buffer.tobytes()    
+@app.route('/health')
+async def health(request):
+    return {"status": "ok", "camera": capisOpened()}
+
+@app.route('/ble-data')
+async def ble_data(request):
+    try:
+        devices = await scan()
+        return devices
+    except Exception as e:
+        return {"error": str(e)}
     
-    return Response(content=frame_bytes, media_type="image/jpeg")
-    
-@app.route('/video-feed')
-def video_feed():
-    return StreamingResponse(generate_frames(), media_type='multipart/x-mixed-replace; boundary=frame')
-
-
+if __name__ == "__main__":
+    uvicorn.run(app, host="0.0.0.0", port=5000)

@@ -116,7 +116,7 @@ class _Section extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Card(
-      color: highlight ? Colors.indigo.shade50 : null,
+      color: highlight ? Theme.of(context).colorScheme.primaryContainer : null,
       margin: const EdgeInsets.only(bottom: 12),
       child: Padding(
         padding: const EdgeInsets.all(14),

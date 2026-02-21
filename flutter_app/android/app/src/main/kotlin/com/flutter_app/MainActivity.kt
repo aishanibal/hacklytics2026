@@ -1,4 +1,4 @@
-package com.yourapp
+package com.flutter_app
 
 import android.Manifest
 import android.bluetooth.BluetoothAdapter
@@ -10,18 +10,15 @@ import android.os.Build
 import android.os.Bundle
 import android.os.ParcelUuid
 import java.util.UUID
-import androidx.appcompat.app.AppCompatActivity
+import io.flutter.embedding.android.FlutterActivity
 import androidx.core.app.ActivityCompat
 
-class MainActivity : AppCompatActivity() {
-
+class MainActivity : FlutterActivity() {
     private var advertiser: BluetoothLeAdvertiser? = null
-
     private val UUID_STRING = "a91c8e72-6b91-4f92-9c9b-6bafcd2e1d13"
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-
         if (hasBlePermissions()) {
             startBLE()
         } else {
@@ -69,21 +66,17 @@ class MainActivity : AppCompatActivity() {
             android.util.Log.e("MainActivity", "BLE failed: BLE advertising not supported")
             return
         }
-
         bluetoothAdapter.name = "TARGET_A15"
-
         val settings = AdvertiseSettings.Builder()
             .setAdvertiseMode(AdvertiseSettings.ADVERTISE_MODE_LOW_LATENCY)
             .setConnectable(false)
             .setTimeout(0)
             .setTxPowerLevel(AdvertiseSettings.ADVERTISE_TX_POWER_HIGH)
             .build()
-
         val data = AdvertiseData.Builder()
             .setIncludeDeviceName(true)
             .addServiceUuid(ParcelUuid(UUID.fromString(UUID_STRING)))
             .build()
-
         advertiser?.startAdvertising(
             settings,
             data,

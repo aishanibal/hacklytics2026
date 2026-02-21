@@ -15,28 +15,34 @@ def estimate_distance(rssi):
 async def scan():
     print("Scanning for target phone...\n")
 
-    while True:
-        devices = await BleakScanner.discover(timeout=2)
+    
+    devices = await BleakScanner.discover(timeout=2)
+    
+    found = False
+    
+    results = []
+    
+    for device in devices:
+        # In Bleak 2.x, advertised UUIDs are in device.details["uuids"]
+        props = device.details.get('props', {}) if device.details else {}
+        uuid = props.get("UUIDs",[])
+        if TARGET_UUID in uuid:
+            rssi = props.get("RSSI",[])
+            distance = estimate_distance(rssi)
+            
+            results.append({
+                "UUID": TARGET_UUID,
+                "address": device.address,
+                "distance": distance
+            })
+                
+            found = True
+            
+    if not found:
+        print("Target not detected\n")
 
-        found = False
+    return results
 
-        for device in devices:
-            # In Bleak 2.x, advertised UUIDs are in device.details["uuids"]
-            uuids = device.details.get("uuids", []) if device.details else []
+    
 
-            if uuids and TARGET_UUID.lower() in [u.lower() for u in uuids]:
-                rssi = device.rssi
-                distance = estimate_distance(rssi)
-
-                results.append({
-                    "UUID": TARGET_UUID,
-                    "address": device.address,
-                    "distance": distance
-                })
-
-                found = True
-
-        if not found:
-            print("Target not detected\n")
-
-
+        

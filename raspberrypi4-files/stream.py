@@ -2,10 +2,11 @@ from fastapi import FastAPI, Response
 from fastapi.middleware.cors import CORSMiddleware
 import cv2
 import asyncio
-from ble_config import scan
 import json
 from fastapi.responses import StreamingResponse, JSONResponse
 import uvicorn
+from ble_config import scan
+from bleak import BleakScanner
 
 app = FastAPI()
 
@@ -38,11 +39,12 @@ async def video(request):
 async def health(request):
     return {"status": "ok", "camera": capisOpened()}
 
-@app.route('/ble-data')
-async def ble_data(request):
+
+@app.get('/ble-data')
+async def ble_data():
     try:
         devices = await scan()
-        return devices
+        return {"devices": devices}
     except Exception as e:
         return {"error": str(e)}
     

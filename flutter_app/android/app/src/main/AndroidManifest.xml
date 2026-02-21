@@ -1,10 +1,12 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
-    <!-- BLE advertising – so Raspberry Pi can identify this device by service UUID -->
+    <!-- BLE advertising – Raspberry Pi identifies this device by name "TARGET_A15" and service UUID -->
     <uses-permission android:name="android.permission.BLUETOOTH" android:maxSdkVersion="30" />
     <uses-permission android:name="android.permission.BLUETOOTH_ADMIN" android:maxSdkVersion="30" />
     <uses-permission android:name="android.permission.BLUETOOTH_ADVERTISE" />
     <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
+    <uses-permission android:name="android.permission.BLUETOOTH_SCAN" />
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
 
     <!-- Health Connect read permissions -->
     <uses-permission android:name="android.permission.health.READ_HEART_RATE"/>

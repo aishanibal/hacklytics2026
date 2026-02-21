@@ -1,43 +1,54 @@
 package com.yourapp
 
-import android.content.Intent
-import io.flutter.embedding.android.FlutterActivity
-import io.flutter.embedding.engine.FlutterEngine
-import io.flutter.plugin.common.EventChannel
-import io.flutter.plugin.common.MethodChannel
+package com.example.bletracker
 
-class MainActivity : FlutterActivity() {
+import android.bluetooth.BluetoothAdapter
+import android.bluetooth.le.*
+import android.os.Bundle
+import androidx.appcompat.app.AppCompatActivity
+import java.util.*
 
-    private lateinit var watchDataManager: WatchDataManager
-    private lateinit var healthPlugin: SamsungHealthPlugin
+class MainActivity : AppCompatActivity() {
 
-    override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
-        super.configureFlutterEngine(flutterEngine)
+    private var advertiser: BluetoothLeAdvertiser? = null
 
-        watchDataManager = WatchDataManager(this)
-        healthPlugin = SamsungHealthPlugin(this, watchDataManager)
+    // Your unique phone ID
+    private val UUID_STRING = "a91c8e72-6b91-4f92-9c9b-6bafcd2e1d13"
 
-        // Register MethodChannel for start/stop commands
-        MethodChannel(
-            flutterEngine.dartExecutor.binaryMessenger,
-            SamsungHealthPlugin.METHOD_CHANNEL
-        ).setMethodCallHandler(healthPlugin)
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
 
-        // Register EventChannel for the continuous sensor stream
-        EventChannel(
-            flutterEngine.dartExecutor.binaryMessenger,
-            SamsungHealthPlugin.EVENT_CHANNEL
-        ).setStreamHandler(healthPlugin)
+        val bluetoothAdapter = BluetoothAdapter.getDefaultAdapter()
+        advertiser = bluetoothAdapter.bluetoothLeAdvertiser
+
+        startAdvertising()
     }
 
-    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
-        super.onActivityResult(requestCode, resultCode, data)
-        // Handle Health Connect permission result here if needed
-        // TODO: forward permission grant/deny back to Flutter via MethodChannel
+    private fun startAdvertising() {
+
+        val uuid = ParcelUuid(UUID.fromString(UUID_STRING))
+
+        val settings = AdvertiseSettings.Builder()
+            .setAdvertiseMode(AdvertiseSettings.ADVERTISE_MODE_LOW_LATENCY)
+            .setTxPowerLevel(AdvertiseSettings.ADVERTISE_TX_POWER_HIGH)
+            .setConnectable(false)
+            .build()
+
+        val data = AdvertiseData.Builder()
+            .addServiceUuid(uuid)
+            .setIncludeDeviceName(false)
+            .build()
+
+        advertiser?.startAdvertising(settings, data, advertiseCallback)
     }
 
-    override fun onDestroy() {
-        healthPlugin.dispose()
-        super.onDestroy()
+    private val advertiseCallback = object : AdvertiseCallback() {
+        override fun onStartSuccess(settingsInEffect: AdvertiseSettings) {
+            println("BLE Advertising started")
+        }
+
+        override fun onStartFailure(errorCode: Int) {
+            println("BLE Advertising failed: $errorCode")
+        }
     }
 }

@@ -1,6 +1,9 @@
 package com.flutter_app.watch
 
+import android.content.BroadcastReceiver
 import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
 import android.os.Build
 import android.os.Bundle
 import android.os.VibrationEffect
@@ -21,9 +24,7 @@ import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.height
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.MutableState
@@ -47,6 +48,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.wear.compose.material.Text
+import com.google.android.gms.wearable.Wearable
 import kotlinx.coroutines.delay
 
 enum class WatchState { IDLE, INCIDENT_DETECTED, INCIDENT_CONFIRMED }
@@ -64,8 +66,16 @@ private val AppFont = FontFamily(Font(R.font.codec_pro_regular, FontWeight.Norma
 class WatchMainActivity : ComponentActivity() {
     private lateinit var vibrator: Vibrator
 
-    // State lives in Activity so updates trigger Compose recomposition
     private val watchState = mutableStateOf(WatchState.IDLE)
+
+    private val stateReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context, intent: Intent) {
+            when (intent.getStringExtra("state")) {
+                "INCIDENT_DETECTED" -> watchState.value = WatchState.INCIDENT_DETECTED
+                "IDLE" -> watchState.value = WatchState.IDLE
+            }
+        }
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -78,6 +88,28 @@ class WatchMainActivity : ComponentActivity() {
             )
         }
     }
+
+    @Suppress("UnspecifiedRegisterReceiverFlag")
+    override fun onResume() {
+        super.onResume()
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            registerReceiver(
+                stateReceiver,
+                IntentFilter("com.flutter_app.watch.STATE_CHANGE"),
+                RECEIVER_NOT_EXPORTED
+            )
+        } else {
+            registerReceiver(
+                stateReceiver,
+                IntentFilter("com.flutter_app.watch.STATE_CHANGE")
+            )
+        }
+    }
+
+    override fun onPause() {
+        super.onPause()
+        unregisterReceiver(stateReceiver)
+    }
 }
 
 @Composable
@@ -86,37 +118,28 @@ fun WatchApp(
     stateHolder: MutableState<WatchState>
 ) {
     var state by stateHolder
-    val countdownState = remember { mutableStateOf(3) }
-    val countdown by countdownState
-    var secondsElapsed by remember { mutableStateOf(0) }
     val isRedState = remember { mutableStateOf(true) }
     var isRed by isRedState
 
-    // Countdown 3 → 2 → 1 on idle, then trigger alert. Initial delay so first frame shows IDLE.
+    val context = LocalContext.current
+
     LaunchedEffect(state) {
-        if (state == WatchState.IDLE) {
-            delay(150)
-            countdownState.value = 3
-            delay(1000)
-            countdownState.value = 2
-            delay(1000)
-            countdownState.value = 1
-            delay(1000)
-            stateHolder.value = WatchState.INCIDENT_DETECTED
+        if (state == WatchState.INCIDENT_DETECTED) {
+            isRed = true
+            while (true) {
+                delay(500)
+                isRed = !isRed
+            }
         }
     }
 
     LaunchedEffect(state) {
         if (state == WatchState.INCIDENT_DETECTED) {
-            secondsElapsed = 0
-            isRed = true
-            // 20 × 500ms = 5 seconds: flash red / very light pink every 500ms, then auto-confirm
-            repeat(20) {
-                delay(500)
-                isRed = !isRed
-                if (it % 2 == 1) secondsElapsed = (it + 1) / 2
+            delay(10_000)
+            if (stateHolder.value == WatchState.INCIDENT_DETECTED) {
+                stateHolder.value = WatchState.INCIDENT_CONFIRMED
+                sendMessageToPhone(context, "/state_update", "INCIDENT_CONFIRMED")
             }
-            stateHolder.value = WatchState.INCIDENT_CONFIRMED
         }
     }
 
@@ -189,18 +212,21 @@ fun WatchApp(
         ) { targetState ->
             when (targetState) {
                 WatchState.IDLE -> IdleScreen(
-                    contentColor = contentColor,
-                    countdownState = countdownState
+                    contentColor = contentColor
                 )
                 WatchState.INCIDENT_DETECTED -> AlertScreen(
                     isRedState = isRedState,
                     onTripleTap = {
                         vibrator.cancel()
                         stateHolder.value = WatchState.IDLE
+                        sendMessageToPhone(context, "/state_update", "IDLE")
                     }
                 )
                 WatchState.INCIDENT_CONFIRMED -> ConfirmedScreen(
-                    onDoubleTap = { stateHolder.value = WatchState.IDLE }
+                    onDoubleTap = {
+                        stateHolder.value = WatchState.IDLE
+                        sendMessageToPhone(context, "/state_update", "IDLE")
+                    }
                 )
             }
         }
@@ -209,10 +235,8 @@ fun WatchApp(
 
 @Composable
 fun IdleScreen(
-    contentColor: Color,
-    countdownState: MutableState<Int>
+    contentColor: Color
 ) {
-    val countdown by countdownState
     Column(
         modifier = Modifier.fillMaxSize(),
         horizontalAlignment = Alignment.CenterHorizontally,
@@ -259,6 +283,15 @@ fun AlertScreen(isRedState: MutableState<Boolean>, onTripleTap: () -> Unit) {
             modifier = Modifier.size(300.dp),
             contentScale = ContentScale.FillBounds
         )
+    }
+}
+
+fun sendMessageToPhone(context: Context, path: String, data: String) {
+    Wearable.getNodeClient(context).connectedNodes.addOnSuccessListener { nodes ->
+        for (node in nodes) {
+            Wearable.getMessageClient(context)
+                .sendMessage(node.id, path, data.toByteArray())
+        }
     }
 }
 

@@ -229,48 +229,95 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 <title>POTS Anomaly Detection — Live Dashboard</title>
 <style>
   *{margin:0;padding:0;box-sizing:border-box}
-  body{font-family:'Segoe UI',system-ui,-apple-system,sans-serif;background:#0f1117;color:#e0e0e0;overflow-x:hidden}
-  .header{background:#161a25;padding:14px 24px;display:flex;align-items:center;gap:16px;border-bottom:1px solid #252a38}
-  .header h1{font-size:18px;font-weight:600;color:#fff}
-  .header .dot{width:10px;height:10px;border-radius:50%;background:#555;flex-shrink:0}
-  .header .dot.live{background:#22c55e;box-shadow:0 0 6px #22c55e}
+  body{font-family:'Segoe UI',system-ui,-apple-system,sans-serif;background:#2a3234;color:#B8D8D8;overflow-x:hidden}
+  .header{background:#3d484a;padding:14px 24px;display:flex;align-items:center;gap:16px;border-bottom:1px solid #4F6367}
+  .header h1{font-size:18px;font-weight:600;color:#B8D8D8}
+  .header .dot{width:10px;height:10px;border-radius:50%;background:#4F6367;flex-shrink:0}
+  .header .dot.live{background:#EEFF5D;box-shadow:0 0 8px #EEFF5D}
   .main{display:grid;grid-template-columns:1fr 340px;height:calc(100vh - 52px)}
-  .video-pane{position:relative;background:#000;display:flex;align-items:center;justify-content:center;overflow:hidden}
+  .video-pane{position:relative;background:#1e2426;display:flex;align-items:center;justify-content:center;overflow:hidden}
   .video-pane img{width:100%;height:100%;object-fit:contain}
-  .side{background:#161a25;overflow-y:auto;padding:16px;display:flex;flex-direction:column;gap:14px;border-left:1px solid #252a38}
-  .card{background:#1c2030;border-radius:10px;padding:14px 16px;border:1px solid #252a38}
-  .card h2{font-size:13px;text-transform:uppercase;letter-spacing:1px;color:#8b92a8;margin-bottom:10px}
+  .side{background:#2a3234;overflow-y:auto;padding:16px;display:flex;flex-direction:column;gap:14px;border-left:1px solid #4F6367}
+  .card{background:#3d484a;border-radius:10px;padding:14px 16px;border:1px solid #4F6367}
+  .card h2{font-size:13px;text-transform:uppercase;letter-spacing:1px;color:#7A9E9F;margin-bottom:10px}
   .status-row{display:flex;align-items:center;gap:10px;margin-bottom:8px}
   .badge{padding:4px 12px;border-radius:6px;font-size:14px;font-weight:700;letter-spacing:0.5px}
-  .badge.normal{background:#14532d;color:#4ade80}
-  .badge.anomaly{background:#7f1d1d;color:#fca5a5}
-  .badge.waiting{background:#3b3b1f;color:#fde68a}
-  .type-badge{padding:3px 10px;border-radius:5px;font-size:13px;font-weight:600;color:#fff}
-  .type-FAINTING{background:#dc2626}
-  .type-SWAYING{background:#ea580c}
-  .type-CROUCHING{background:#2563eb}
-  .type-HAND_ON_HEAD{background:#16a34a}
-  .type-UNKNOWN{background:#6b7280}
-  .bar-container{background:#252a38;border-radius:4px;height:14px;position:relative;overflow:hidden;margin-top:6px}
+  .badge.normal{background:rgba(122,158,159,0.35);color:#B8D8D8;border:1px solid #7A9E9F}
+  .badge.anomaly{background:rgba(254,95,85,0.2);color:#FE5F55;border:1px solid #FE5F55}
+  .badge.waiting{background:rgba(79,99,103,0.5);color:#7A9E9F;border:1px solid #4F6367}
+  .type-badge{padding:3px 10px;border-radius:5px;font-size:13px;font-weight:600;color:#2a3234}
+  .type-FAINTING{background:#FE5F55}
+  .type-SWAYING{background:#EEFF5D}
+  .type-CROUCHING{background:#7A9E9F}
+  .type-HAND_ON_HEAD{background:#B8D8D8;color:#2a3234}
+  .type-UNKNOWN{background:#4F6367;color:#B8D8D8}
+  .bar-container{background:#2a3234;border-radius:4px;height:14px;position:relative;overflow:hidden;margin-top:6px;border:1px solid #4F6367}
   .bar-fill{height:100%;border-radius:4px;transition:width .3s}
-  .bar-threshold{position:absolute;top:-2px;bottom:-2px;width:2px;background:#fff;border-radius:1px}
-  .score-row{display:flex;justify-content:space-between;font-size:12px;color:#8b92a8;margin-top:4px}
+  .bar-threshold{position:absolute;top:-2px;bottom:-2px;width:2px;background:#EEFF5D;border-radius:1px;box-shadow:0 0 4px #EEFF5D}
+  .score-row{display:flex;justify-content:space-between;font-size:12px;color:#7A9E9F;margin-top:4px}
   .feat-grid{display:grid;grid-template-columns:1fr 1fr;gap:6px}
-  .feat-item{display:flex;justify-content:space-between;font-size:12px;padding:4px 8px;background:#252a38;border-radius:5px}
-  .feat-item .label{color:#8b92a8}
-  .feat-item .val{color:#e0e0e0;font-weight:500;font-variant-numeric:tabular-nums}
+  .feat-item{display:flex;justify-content:space-between;font-size:12px;padding:4px 8px;background:#2a3234;border-radius:5px;border:1px solid #4F6367}
+  .feat-item .label{color:#7A9E9F}
+  .feat-item .val{color:#EEFF5D;font-weight:500;font-variant-numeric:tabular-nums}
   .joint-grid{display:grid;grid-template-columns:1fr 1fr;gap:4px}
-  .joint-item{font-size:11px;padding:3px 8px;background:#252a38;border-radius:4px;display:flex;justify-content:space-between;gap:6px}
-  .joint-item .name{color:#8b92a8}
-  .joint-item .coord{font-variant-numeric:tabular-nums}
+  .joint-item{font-size:11px;padding:3px 8px;background:#2a3234;border-radius:4px;display:flex;justify-content:space-between;gap:6px;border:1px solid #4F6367}
+  .joint-item .name{color:#7A9E9F}
+  .joint-item .coord{color:#B8D8D8;font-variant-numeric:tabular-nums}
   .conf-dot{display:inline-block;width:7px;height:7px;border-radius:50%;margin-right:4px}
-  .buf-bar{background:#252a38;border-radius:4px;height:8px;overflow:hidden;margin-top:4px}
-  .buf-fill{height:100%;background:#6366f1;border-radius:4px;transition:width .3s}
-  .fps{font-size:12px;color:#8b92a8}
-  .fps span{color:#22c55e;font-weight:600}
+  .buf-bar{background:#2a3234;border-radius:4px;height:8px;overflow:hidden;margin-top:4px;border:1px solid #4F6367}
+  .buf-fill{height:100%;background:linear-gradient(90deg,#7A9E9F,#EEFF5D);border-radius:4px;transition:width .3s}
+  .fps{font-size:12px;color:#7A9E9F}
+  .fps span{color:#EEFF5D;font-weight:600}
+  .watch-list{display:flex;flex-direction:column;gap:10px}
+  .watch-item{display:flex;flex-direction:column;gap:2px;padding:12px 14px;background:#3d484a;border-radius:8px;border:2px solid #4F6367;box-shadow:0 2px 8px rgba(0,0,0,0.25);transition:border .2s,background .2s,box-shadow .2s}
+  .watch-item.primary{border-color:#EEFF5D;background:rgba(238,255,93,0.08);box-shadow:0 0 0 1px rgba(238,255,93,0.3),0 2px 8px rgba(0,0,0,0.25)}
+  .watch-item.active{border-color:#EEFF5D;background:rgba(238,255,93,0.12);box-shadow:0 0 0 2px rgba(238,255,93,0.4),0 2px 8px rgba(0,0,0,0.25)}
+  .watch-item:not(.active){border-color:#FE5F55;background:rgba(254,95,85,0.08);box-shadow:0 0 0 2px rgba(254,95,85,0.35),0 2px 8px rgba(0,0,0,0.25)}
+  .watch-item.primary:not(.active){border-color:#FE5F55;background:rgba(254,95,85,0.1);box-shadow:0 0 0 2px rgba(254,95,85,0.4),0 2px 8px rgba(0,0,0,0.25)}
+  .watch-name{font-size:14px;font-weight:600;color:#B8D8D8}
+  .watch-item.primary .watch-name{color:#EEFF5D}
+  .watch-item.primary:not(.active) .watch-name{color:#FE5F55}
+  .watch-item:not(.active) .watch-name{color:#B8D8D8}
+  .watch-uuid{font-size:11px;font-family:ui-monospace,monospace;color:#7A9E9F;word-break:break-all}
+  .watch-item:not(.active) .watch-uuid{color:#7A9E9F}
+  .watch-actions{display:flex;gap:6px;margin-top:8px}
+  .watch-btn{flex:1;padding:6px 10px;border:none;border-radius:5px;font-size:12px;font-weight:600;cursor:pointer;transition:background .2s,color .2s,opacity .2s}
+  .watch-btn.activate{background:#EEFF5D;color:#2a3234}
+  .watch-btn.activate:hover{background:#B8D8D8;color:#2a3234}
+  .watch-btn.deactivate{background:#FE5F55;color:#fff}
+  .watch-btn.deactivate:hover{background:#e54d43;color:#fff}
+  .watch-btn.hidden{display:none}
+  .watch-status{font-size:11px;font-weight:600;margin-top:4px;text-transform:uppercase;letter-spacing:0.5px}
+  .watch-item.active .watch-status{color:#EEFF5D}
+  .watch-item:not(.active) .watch-status{color:#FE5F55}
+  .modal-overlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,0.7);z-index:1000;align-items:center;justify-content:center;padding:20px}
+  .modal-overlay.show{display:flex}
+  .modal-box{background:#3d484a;border:2px solid #FE5F55;border-radius:10px;padding:24px;min-width:320px;max-width:400px;box-shadow:0 0 0 2px rgba(254,95,85,0.3),0 8px 32px rgba(0,0,0,0.5)}
+  .modal-box h3{font-size:16px;color:#B8D8D8;margin-bottom:16px}
+  .modal-box label{display:block;font-size:12px;color:#7A9E9F;margin-bottom:6px}
+  .modal-box input[type=email]{width:100%;padding:10px 12px;border:1px solid #4F6367;border-radius:6px;background:#2a3234;color:#B8D8D8;font-size:14px;margin-bottom:16px;box-sizing:border-box}
+  .modal-box input[type=email]:focus{outline:none;border-color:#FE5F55}
+  .modal-actions{display:flex;gap:10px;justify-content:flex-end}
+  .modal-btn{padding:8px 18px;border:none;border-radius:6px;font-size:13px;font-weight:600;cursor:pointer;transition:background .2s,color .2s}
+  .modal-btn.cancel{background:#4F6367;color:#B8D8D8}
+  .modal-btn.cancel:hover{background:#7A9E9F}
+  .modal-btn.send{background:#FE5F55;color:#fff}
+  .modal-btn.send:hover{background:#e54d43}
 </style>
 </head>
 <body>
+
+<!-- Deactivate report popup -->
+<div class="modal-overlay" id="reportModal">
+  <div class="modal-box">
+    <h3>Send deactivation report</h3>
+    <label for="reportEmail">Email address</label>
+    <input type="email" id="reportEmail" placeholder="you@example.com" />
+    <div class="modal-actions">
+      <button type="button" class="modal-btn send" id="modalSendReport">Send report</button>
+    </div>
+  </div>
+</div>
 
 <div class="header">
   <div class="dot" id="liveDot"></div>
@@ -284,6 +331,49 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   </div>
 
   <div class="side">
+    <!-- Watches (UUID + name) -->
+    <div class="card">
+      <h2>Watches</h2>
+      <div class="watch-list" id="watchList">
+        <div class="watch-item primary active" data-watch-id="a91c8e72">
+          <span class="watch-name">Watch A15</span>
+          <span class="watch-uuid">a91c8e72-6b91-4f92-9c9b-6bafcd2e1d13</span>
+          <span class="watch-status">Active</span>
+          <div class="watch-actions">
+            <button type="button" class="watch-btn activate hidden">Activate</button>
+            <button type="button" class="watch-btn deactivate">Deactivate</button>
+          </div>
+        </div>
+        <div class="watch-item" data-watch-id="b82d9f83">
+          <span class="watch-name">Watch B22</span>
+          <span class="watch-uuid">b82d9f83-7ca2-5g03-0d0c-7cbgde3f2e24</span>
+          <span class="watch-status">Inactive</span>
+          <div class="watch-actions">
+            <button type="button" class="watch-btn activate">Activate</button>
+            <button type="button" class="watch-btn deactivate hidden">Deactivate</button>
+          </div>
+        </div>
+        <div class="watch-item" data-watch-id="c93e0g94">
+          <span class="watch-name">Watch C34</span>
+          <span class="watch-uuid">c93e0g94-8db3-6h14-1e1d-8dchef4g3f35</span>
+          <span class="watch-status">Inactive</span>
+          <div class="watch-actions">
+            <button type="button" class="watch-btn activate">Activate</button>
+            <button type="button" class="watch-btn deactivate hidden">Deactivate</button>
+          </div>
+        </div>
+        <div class="watch-item" data-watch-id="d04f1ha5">
+          <span class="watch-name">Watch D45</span>
+          <span class="watch-uuid">d04f1ha5-9ec4-7i25-2f2e-9edifg5h4g46</span>
+          <span class="watch-status">Inactive</span>
+          <div class="watch-actions">
+            <button type="button" class="watch-btn activate">Activate</button>
+            <button type="button" class="watch-btn deactivate hidden">Deactivate</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
     <!-- Status card -->
     <div class="card">
       <h2>Detection Status</h2>
@@ -292,7 +382,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         <span class="type-badge type-UNKNOWN" id="typeBadge" style="display:none"></span>
       </div>
       <div class="bar-container">
-        <div class="bar-fill" id="scoreBar" style="width:0%;background:#22c55e"></div>
+        <div class="bar-fill" id="scoreBar" style="width:0%;background:#7A9E9F"></div>
         <div class="bar-threshold" id="threshLine" style="left:50%"></div>
       </div>
       <div class="score-row">
@@ -386,7 +476,7 @@ function update(d) {
   const pct = Math.min(d.score / maxScore * 100, 100);
   const bar = document.getElementById("scoreBar");
   bar.style.width = pct + "%";
-  bar.style.background = d.is_anomaly ? "#ef4444" : "#22c55e";
+  bar.style.background = d.is_anomaly ? "#FE5F55" : "#7A9E9F";
   document.getElementById("threshLine").style.left = Math.min(d.threshold / maxScore * 100, 100) + "%";
   document.getElementById("scoreVal").textContent = d.score.toFixed(6);
   document.getElementById("threshVal").textContent = d.threshold.toFixed(6);
@@ -410,13 +500,59 @@ function update(d) {
   let jhtml = "";
   for (const [name, coords] of Object.entries(d.joints || {})) {
     const [x, y, conf] = coords;
-    const color = conf > 0.5 ? "#22c55e" : "#ef4444";
+    const color = conf > 0.5 ? "#EEFF5D" : "#FE5F55";
     jhtml += `<div class="joint-item"><span class="name"><span class="conf-dot" style="background:${color}"></span>${name}</span><span class="coord">${x},${y}</span></div>`;
   }
   jg.innerHTML = jhtml;
 }
 
 connectWS();
+
+// Stored email when user sends report (from deactivate popup)
+let reportEmail = null;
+
+const reportModal = document.getElementById("reportModal");
+const reportEmailInput = document.getElementById("reportEmail");
+const modalSendReport = document.getElementById("modalSendReport");
+
+function openReportModal() {
+  reportEmailInput.value = "";
+  reportModal.classList.add("show");
+  reportEmailInput.focus();
+}
+function closeReportModal() {
+  reportModal.classList.remove("show");
+}
+
+reportModal.addEventListener("click", function(e) {
+  if (e.target === reportModal) closeReportModal();
+});
+modalSendReport.addEventListener("click", function() {
+  reportEmail = reportEmailInput.value.trim();
+  closeReportModal();
+});
+
+// Watch activate / deactivate
+document.getElementById("watchList").addEventListener("click", function(e) {
+  const btn = e.target.closest(".watch-btn");
+  if (!btn) return;
+  const item = btn.closest(".watch-item");
+  const statusEl = item.querySelector(".watch-status");
+  const activateBtn = item.querySelector(".watch-btn.activate");
+  const deactivateBtn = item.querySelector(".watch-btn.deactivate");
+  if (btn.classList.contains("activate")) {
+    item.classList.add("active");
+    statusEl.textContent = "Active";
+    activateBtn.classList.add("hidden");
+    deactivateBtn.classList.remove("hidden");
+  } else if (btn.classList.contains("deactivate")) {
+    item.classList.remove("active");
+    statusEl.textContent = "Inactive";
+    activateBtn.classList.remove("hidden");
+    deactivateBtn.classList.add("hidden");
+    openReportModal();
+  }
+});
 </script>
 </body>
 </html>"""
@@ -426,3 +562,5 @@ connectWS();
 async def pose_dashboard():
     _ensure_bg()
     return HTMLResponse(DASHBOARD_HTML)
+
+

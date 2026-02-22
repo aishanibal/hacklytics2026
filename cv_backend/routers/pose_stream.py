@@ -1,6 +1,9 @@
 """
 Pose + LSTM anomaly detection — web dashboard.
 
+Uses BLE distance matching to lock onto a single target person
+and only run pose/LSTM on them.
+
 Endpoints:
   GET  /pose/view   — HTML dashboard
   GET  /pose/live   — MJPEG video stream (skeleton overlay)
@@ -17,6 +20,7 @@ from typing import Any
 
 import cv2
 import numpy as np
+import requests as http_requests
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, StreamingResponse
 
@@ -32,6 +36,97 @@ VIDEO_SOURCE: str = os.getenv("VIDEO_SOURCE", "0")
 MODEL_PATH: str = os.getenv("MODEL_PATH", "models/pots_model_complete.pt")
 FRAME_STEP: int = int(os.getenv("FRAME_STEP", "0"))  # 0 = use model config
 
+# ── BLE config ──
+BLE_DATA_URL: str = os.getenv("BLE_DATA_URL", "http://10.136.28.70:5000/ble-data")
+USE_TEST_BLE: bool = os.getenv("USE_TEST_BLE", "true").lower() in ("1", "true", "yes")
+TARGET_BLE_NAME: str = os.getenv("TARGET_BLE_NAME", "TARGET_A15")
+
+TEST_BLE_REQUESTS = [
+    {"name": "TARGET_A15", "UUID": "a91c8e72-6b91-4f92-9c9b-6bafcd2e1d13", "mac-address": "AA:BB:CC:DD:EE:01", "distance": 2.5},
+    {"name": "Device_02", "UUID": "b82d9f83-7ca2-5g03-0d0c-7cbgde3f2e24", "mac-address": "AA:BB:CC:DD:EE:02", "distance": 3.1},
+    {"name": "Device_03", "UUID": "c93e0g94-8db3-6h14-1e1d-8dchef4g3f35", "mac-address": "AA:BB:CC:DD:EE:03", "distance": 1.8},
+]
+
+
+def _get_ble_data() -> list[dict]:
+    """Fetch BLE device list (test or live API)."""
+    if USE_TEST_BLE:
+        return TEST_BLE_REQUESTS
+    try:
+        r = http_requests.get(BLE_DATA_URL, timeout=2)
+        if r.status_code != 200:
+            return TEST_BLE_REQUESTS
+        data = r.json()
+        if isinstance(data, list):
+            return data
+        raw = data.get("Requests") or data.get("requests") or []
+        return raw if isinstance(raw, list) else TEST_BLE_REQUESTS
+    except Exception:
+        return TEST_BLE_REQUESTS
+
+
+
+# Calibration constant: person at D meters has bbox height ≈ FOCAL_HEIGHT / D pixels.
+# Tune for your camera: measure someone's bbox height at a known distance,
+# then FOCAL_HEIGHT = distance_meters * bbox_height_pixels.
+# e.g. person at 2m with bbox height 300px → FOCAL_HEIGHT = 600
+FOCAL_HEIGHT: float = float(os.getenv("FOCAL_HEIGHT", "600"))
+
+
+def _match_target(detections: list[dict], ble_devices: list[dict],
+                  target_name: str) -> tuple[dict | None, float | None]:
+    """
+    Use BLE distance to pick the person in the crowd whose bbox-estimated
+    distance best matches the BLE-reported distance.
+    Returns (detection, ble_distance) or (None, None).
+    """
+    if not detections:
+        return None, None
+
+    target_ble = None
+    for b in ble_devices:
+        if (b.get("name") or "") == target_name:
+            target_ble = b
+            break
+
+    if target_ble is None:
+        return None, None
+
+    ble_dist = float(target_ble.get("distance", 999))
+
+    # estimate each person's distance from camera using bbox height
+    # then pick the one closest to the BLE distance
+    best: dict | None = None
+    best_diff = float("inf")
+    for det in detections:
+        x1, y1, x2, y2 = det["bbox"]
+        bbox_h = max(y2 - y1, 1)
+        estimated_dist = FOCAL_HEIGHT / bbox_h
+        diff = abs(estimated_dist - ble_dist)
+        if diff < best_diff:
+            best_diff = diff
+            best = det
+
+    return best, ble_dist
+
+# ── IoU helper ──
+
+def _iou(box_a: list, box_b: list) -> float:
+    """Intersection-over-union between two [x1, y1, x2, y2] boxes."""
+    xa = max(box_a[0], box_b[0])
+    ya = max(box_a[1], box_b[1])
+    xb = min(box_a[2], box_b[2])
+    yb = min(box_a[3], box_b[3])
+    inter = max(0, xb - xa) * max(0, yb - ya)
+    area_a = (box_a[2] - box_a[0]) * (box_a[3] - box_a[1])
+    area_b = (box_b[2] - box_b[0]) * (box_b[3] - box_b[1])
+    union = area_a + area_b - inter
+    return inter / union if union > 0 else 0.0
+
+
+IOU_THRESHOLD = 0.3
+LOST_FRAMES_BEFORE_RELOCK = 15
+
 # ── shared state (written by bg thread, read by endpoints) ──
 
 _lock = threading.Lock()
@@ -39,12 +134,13 @@ _state: dict[str, Any] = {
     "jpeg": b"",
     "telemetry": {},
 }
+_active = threading.Event()        # tracking on/off
+_request_relock = threading.Event() # signal bg loop to re-fetch BLE
 
 
 def _bg_loop():
-    """Background thread: camera → YOLO → features → LSTM → classifier."""
+    """Background thread: BLE lock-on once → IoU tracking thereafter."""
     source: Any = int(VIDEO_SOURCE) if VIDEO_SOURCE.isdigit() else VIDEO_SOURCE
-    use_cap = isinstance(source, int)
 
     predictor = AnomalyPredictor(model_path=MODEL_PATH)
     cfg = predictor.pipeline_config
@@ -55,12 +151,14 @@ def _bg_loop():
     engineer = FeatureEngineer()
     buffer = SequenceBuffer(window_size=window_size, num_features=75)
 
-    cap = None
-    if use_cap:
-        cap = cv2.VideoCapture(source)
+    cap = cv2.VideoCapture(source)
+    if not cap.isOpened():
+        print(f"[pose] ERROR: Cannot open video source: {source}")
+        return
+    print(f"[pose] Opened video source: {source}")
 
     frame_count = 0
-    label = "Waiting for buffer..."
+    label = "Inactive — press Activate"
     score = 0.0
     threshold = predictor.threshold
     is_anomaly = False
@@ -69,6 +167,12 @@ def _bg_loop():
     prev_t = time.time()
     last_eng: dict = {}
     last_joints: dict = {}
+    ble_dist: float | None = None
+
+    # tracking state
+    target_bbox: list | None = None  # None = lock-on mode
+    lost_count = 0
+    tracking_mode = "INACTIVE"
 
     eng_names = ["nose_y", "hip_y", "torso_len", "full_height",
                  "shoulder_angle", "knee_angle", "vertical_ratio"]
@@ -80,31 +184,103 @@ def _bg_loop():
     ]
 
     while True:
-        # grab frame
-        if use_cap:
-            ret, frame = cap.read()
-            if not ret:
-                time.sleep(0.1)
-                continue
-        else:
-            import requests as _req
-            try:
-                resp = _req.get(source, timeout=5)
-                arr = np.frombuffer(resp.content, dtype=np.uint8)
-                frame = cv2.imdecode(arr, cv2.IMREAD_COLOR)
-                if frame is None:
-                    raise ValueError("decode failed")
-            except Exception:
-                time.sleep(1)
-                continue
+        ret, frame = cap.read()
+        if not ret:
+            print(f"[pose] No frame from {source}, retrying...")
+            time.sleep(0.5)
+            cap.release()
+            cap = cv2.VideoCapture(source)
+            continue
 
         frame_count += 1
         fh, fw = frame.shape[:2]
 
-        kps_raw, annotated = extractor.extract(frame)
+        detections = extractor.extract_all(frame)
+        annotated = frame.copy()
+        target: dict | None = None
+
+        is_active = _active.is_set()
+
+        # handle relock request (activate was pressed)
+        if _request_relock.is_set():
+            _request_relock.clear()
+            target_bbox = None
+            engineer.reset()
+            buffer.reset()
+            score = 0.0
+            is_anomaly = False
+            anomaly_type = ""
+            label = "Waiting for buffer..."
+
+        if not is_active:
+            # ── INACTIVE: just show video, no tracking ──
+            tracking_mode = "INACTIVE"
+            target_bbox = None
+            label = "Inactive — press Activate"
+        elif target_bbox is None:
+            # ── LOCK-ON: fetch BLE, match target by distance ──
+            tracking_mode = "LOCK-ON"
+            ble_devices = _get_ble_data()
+            matched, matched_dist = _match_target(detections, ble_devices, TARGET_BLE_NAME)
+            if matched is not None:
+                target = matched
+                target_bbox = matched["bbox"]
+                ble_dist = matched_dist
+                lost_count = 0
+                tracking_mode = "TRACKING"
+                x1, y1, x2, y2 = matched["bbox"]
+                est = FOCAL_HEIGHT / max(y2 - y1, 1)
+                print(f"[pose] Locked onto {TARGET_BLE_NAME} "
+                      f"(BLE: {ble_dist:.1f}m, est: {est:.1f}m, bbox_h: {y2-y1:.0f}px)")
+        else:
+            # ── TRACKING: find best IoU match to previous bbox ──
+            tracking_mode = "TRACKING"
+            best_iou = 0.0
+            best_det = None
+            for det in detections:
+                overlap = _iou(target_bbox, det["bbox"])
+                if overlap > best_iou:
+                    best_iou = overlap
+                    best_det = det
+
+            if best_det is not None and best_iou >= IOU_THRESHOLD:
+                target = best_det
+                target_bbox = best_det["bbox"]
+                lost_count = 0
+            else:
+                lost_count += 1
+                if lost_count > LOST_FRAMES_BEFORE_RELOCK:
+                    print(f"[pose] Lost target for {lost_count} frames, re-locking...")
+                    target_bbox = None
+                    engineer.reset()
+                    buffer.reset()
+
+        # draw non-target persons dimmed
+        for det in detections:
+            if det is not target:
+                KeypointExtractor.draw_skeleton(
+                    annotated, det["keypoints"],
+                    color=(80, 80, 80), thickness=1,
+                    bbox=det["bbox"],
+                )
+
+        # draw + process target person
+        kps_raw = None
+        if target is not None:
+            kps_raw = target["keypoints"]
+
+            dist_label = f"{TARGET_BLE_NAME}"
+            if ble_dist is not None:
+                dist_label += f" {ble_dist:.1f}m"
+
+            KeypointExtractor.draw_skeleton(
+                annotated, kps_raw,
+                color=(0, 255, 0), thickness=2,
+                label=dist_label,
+                bbox=target["bbox"],
+            )
 
         if kps_raw is not None:
-            # joints for telemetry
             last_joints = {}
             for idx, name in joint_map:
                 px, py, conf = kps_raw[idx]
@@ -134,7 +310,7 @@ def _bg_loop():
                         label = "Normal"
                         anomaly_type = ""
         else:
-            label = "No person detected"
+            label = "No person detected" if not detections else "Target lost — re-locking..."
             last_joints = {}
             last_eng = {}
 
@@ -156,13 +332,16 @@ def _bg_loop():
             "buffer_size": buffer.window_size,
             "engineered": last_eng,
             "joints": last_joints,
+            "target_ble": TARGET_BLE_NAME,
+            "ble_distance": round(ble_dist, 2) if ble_dist is not None else None,
+            "persons_detected": len(detections),
+            "tracking_mode": tracking_mode,
+            "lost_count": lost_count,
         }
 
         with _lock:
             _state["jpeg"] = jpeg.tobytes()
             _state["telemetry"] = telemetry
-
-        time.sleep(0.01)
 
 
 _thread_started = False
@@ -174,6 +353,27 @@ def _ensure_bg():
         _thread_started = True
         t = threading.Thread(target=_bg_loop, daemon=True)
         t.start()
+
+
+# ── Activate / Deactivate ──
+
+@router.post("/pose/activate")
+async def pose_activate():
+    _ensure_bg()
+    _active.set()
+    _request_relock.set()
+    return {"status": "activated", "info": "BLE lock-on triggered"}
+
+
+@router.post("/pose/deactivate")
+async def pose_deactivate():
+    _active.clear()
+    return {"status": "deactivated", "info": "Tracking stopped"}
+
+
+@router.get("/pose/status")
+async def pose_status():
+    return {"active": _active.is_set()}
 
 
 # ── MJPEG ──
@@ -331,9 +531,13 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   </div>
 
   <div class="side">
-    <!-- Watches (UUID + name) -->
+    <!-- Watches (UUID + name) + Tracking status -->
     <div class="card">
       <h2>Watches</h2>
+      <div style="font-size:12px;color:#7A9E9F;margin-bottom:10px;display:flex;flex-wrap:wrap;gap:6px;align-items:center">
+        Target: <span id="bleName">--</span> <span id="bleDist" style="color:#EEFF5D;font-weight:600">--</span>
+        &middot; Persons: <b id="personCount">0</b> &middot; Mode: <b id="trackMode">--</b>
+      </div>
       <div class="watch-list" id="watchList">
         <div class="watch-item primary active" data-watch-id="a91c8e72">
           <span class="watch-name">Watch A15</span>
@@ -453,6 +657,15 @@ function connectWS() {
 }
 
 function update(d) {
+  // BLE
+  document.getElementById("bleName").textContent = d.target_ble || "--";
+  document.getElementById("bleDist").textContent = d.ble_distance != null ? d.ble_distance + "m" : "--";
+  document.getElementById("personCount").textContent = d.persons_detected || 0;
+  const tm = d.tracking_mode || "--";
+  const tmEl = document.getElementById("trackMode");
+  tmEl.textContent = tm;
+  tmEl.style.color = tm === "TRACKING" ? "#EEFF5D" : tm === "LOCK-ON" ? "#7A9E9F" : "#7A9E9F";
+
   // FPS
   document.getElementById("fpsVal").textContent = d.fps;
 
@@ -506,6 +719,14 @@ function update(d) {
   jg.innerHTML = jhtml;
 }
 
+function activate() {
+  fetch("/pose/activate", {method: "POST"});
+}
+
+function deactivate() {
+  fetch("/pose/deactivate", {method: "POST"});
+}
+
 connectWS();
 
 // Stored email when user sends report (from deactivate popup)
@@ -532,7 +753,7 @@ modalSendReport.addEventListener("click", function() {
   closeReportModal();
 });
 
-// Watch activate / deactivate
+// Watch activate / deactivate — toggle UI and call backend
 document.getElementById("watchList").addEventListener("click", function(e) {
   const btn = e.target.closest(".watch-btn");
   if (!btn) return;
@@ -541,15 +762,24 @@ document.getElementById("watchList").addEventListener("click", function(e) {
   const activateBtn = item.querySelector(".watch-btn.activate");
   const deactivateBtn = item.querySelector(".watch-btn.deactivate");
   if (btn.classList.contains("activate")) {
-    item.classList.add("active");
+    // Deactivate all others, then activate this one
+    document.querySelectorAll(".watch-item").forEach(function(w) {
+      w.classList.remove("active", "primary");
+      w.querySelector(".watch-status").textContent = "Inactive";
+      w.querySelector(".watch-btn.activate").classList.remove("hidden");
+      w.querySelector(".watch-btn.deactivate").classList.add("hidden");
+    });
+    item.classList.add("active", "primary");
     statusEl.textContent = "Active";
     activateBtn.classList.add("hidden");
     deactivateBtn.classList.remove("hidden");
+    activate();
   } else if (btn.classList.contains("deactivate")) {
-    item.classList.remove("active");
+    item.classList.remove("active", "primary");
     statusEl.textContent = "Inactive";
     activateBtn.classList.remove("hidden");
     deactivateBtn.classList.add("hidden");
+    deactivate();
     openReportModal();
   }
 });

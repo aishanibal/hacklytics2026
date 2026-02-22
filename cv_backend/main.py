@@ -2,11 +2,10 @@ import os
 import asyncio
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from routers import stream, report
+from routers import pose_stream, report
 
 app = FastAPI(title="Health Anomaly Detection API", version="0.1.0")
 
-# HACKATHON: wide-open CORS — lock this down post-hackathon
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -15,8 +14,14 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-app.include_router(stream.router)
+app.include_router(pose_stream.router)
 app.include_router(report.router)
+
+try:
+    from routers import stream
+    app.include_router(stream.router)
+except Exception:
+    pass
 
 
 @app.get("/health")

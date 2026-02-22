@@ -4,16 +4,21 @@ Work in progress — to be wired to pose/report pipeline.
 """
 
 import json
+import os
 import re
 
 import google.generativeai as genai
 from pydantic import BaseModel, Field
 
-# Configure Gemini — set your API key directly or use env GOOGLE_API_KEY
-GEMINI_API_KEY = "your-gemini-api-key"  # or os.getenv("GOOGLE_API_KEY", "your-gemini-api-key")
+# Configure Gemini — use env GOOGLE_API_KEY or set in code
+GEMINI_API_KEY = os.getenv("GOOGLE_API_KEY", "").strip() or "your-gemini-api-key"
+if not GEMINI_API_KEY or GEMINI_API_KEY == "your-gemini-api-key":
+    import warnings
+    warnings.warn("GOOGLE_API_KEY not set; Gemini endpoints (/ai/extrapolate, /pose/extrapolate) will fail.")
 genai.configure(api_key=GEMINI_API_KEY)
 
-MODEL_NAME = "gemini-1.5-flash"  # or gemini-1.5-pro for heavier reasoning
+# Use a model that supports generateContent (v1beta). Override with GEMINI_MODEL env.
+MODEL_NAME = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
 
 # Expected JSON shape from Gemini
 SYSTEM_INSTRUCTION = """You take sensor data and pose/training data as input. Your job is to output valid JSON only (no markdown or extra text) that makes it easier to trigger and prioritize alerts.
@@ -86,6 +91,53 @@ def get_medical_alert_json(context: str, observations: str) -> GeminiAlertRespon
     )
 
 
+# ─── Extrapolate from graph / pose time-series ───
+
+EXTRAPOLATE_SYSTEM = """You are analyzing a time-series of pose and limb data from a person during an anomaly event detected by computer vision.
+
+You will receive:
+1. The anomaly classification (e.g. FAINTING, SWAYING, CROUCHING, HAND ON HEAD, UNKNOWN).
+2. A list of samples over time. Each sample has: timestamp (t), anomaly reconstruction score, threshold, and engineered features such as: nose_y, hip_y, torso_len, full_height, shoulder_angle, knee_angle, vertical_ratio. These describe body posture and limb positions over time.
+
+Your task: Extrapolate from this data. Describe in clear, concise language:
+- What the limbs and posture are doing over time (e.g. nose dropping, knees bending, torso compressing, sway patterns).
+- How the reported anomaly classification is reflected in the numbers (e.g. "nose_y increases over time indicating the head/body lowering").
+- Any notable patterns or transitions (e.g. "vertical_ratio rises suggesting the person went from upright to more horizontal").
+- A short conclusion: what the combined data suggests is happening physically.
+
+Do not give medical advice. Output plain text (no JSON), 2–4 short paragraphs."""
+
+
+def extrapolate_from_graph_data(anomaly_type: str, samples: list[dict]) -> str:
+    """
+    Send graph data (pose/limb time-series) and anomaly classification to Gemini;
+    returns extrapolation text describing what the limbs/posture are doing.
+    """
+    key = os.getenv("GOOGLE_API_KEY", "").strip()
+    if not key or key == "your-gemini-api-key":
+        raise ValueError(
+            "GOOGLE_API_KEY is not set. Add it to cv_backend/.env or set the env var."
+        )
+    payload = {
+        "anomaly_classification": anomaly_type,
+        "sample_count": len(samples),
+        "samples": samples,
+    }
+    observations = json.dumps(payload, indent=2)
+    model = genai.GenerativeModel(
+        model_name=MODEL_NAME,
+        system_instruction=EXTRAPOLATE_SYSTEM,
+    )
+    prompt = (
+        "Anomaly classification from the system: {}\n\n"
+        "Time-series data (pose/limb features over time):\n\n{}"
+    ).format(anomaly_type, observations)
+    response = model.generate_content(prompt)
+    if not response.text:
+        raise ValueError("Gemini returned empty response (possibly blocked or failed).")
+    return response.text.strip()
+
+
 # ─── Latest alert store (for Flutter to poll) ───
 
 import time
@@ -110,6 +162,30 @@ router = APIRouter(prefix="/ai", tags=["ai-config"])
 class AlertRequest(BaseModel):
     context: str = "Single person tracked via BLE; sensor and pose data."
     observations: str = ""
+
+
+class ExtrapolateRequest(BaseModel):
+    """Graph data + anomaly classification to send to Gemini for extrapolation."""
+    anomaly_type: str = Field(description="e.g. FAINTING, SWAYING, CROUCHING, HAND ON HEAD, UNKNOWN")
+    samples: list[dict] = Field(default_factory=list, description="Time-series of pose/limb features (t, score, nose_y, hip_y, etc.)")
+
+
+@router.post("/extrapolate")
+async def post_extrapolate(request: ExtrapolateRequest) -> dict:
+    """
+    Send graph data (pose/limb time-series) and anomaly classification to Gemini.
+    Returns extrapolation text describing what the limbs/posture are doing over time.
+    """
+    if not request.samples:
+        raise HTTPException(400, detail="samples cannot be empty")
+    try:
+        text = extrapolate_from_graph_data(
+            anomaly_type=request.anomaly_type or "UNKNOWN",
+            samples=request.samples,
+        )
+        return {"extrapolation": text, "anomaly_type": request.anomaly_type}
+    except Exception as e:
+        raise HTTPException(502, detail=f"Gemini extrapolation failed: {e}")
 
 
 @router.post("/medical-alert", response_model=GeminiAlertResponse)

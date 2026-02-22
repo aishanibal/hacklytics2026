@@ -21,8 +21,8 @@ from typing import Any
 import cv2
 import numpy as np
 import requests as http_requests
-from fastapi import APIRouter, Request, WebSocket, WebSocketDisconnect
-from fastapi.responses import HTMLResponse, StreamingResponse
+from fastapi import APIRouter, HTTPException, Request, WebSocket, WebSocketDisconnect
+from fastapi.responses import HTMLResponse, Response, StreamingResponse
 
 from core.keypoint_extractor import KeypointExtractor
 from core.feature_engineering import FeatureEngineer
@@ -50,6 +50,10 @@ TEST_BLE_REQUESTS = [
 # ── Health Connect config ──
 ANOMALY_HEALTH_DELAY: float = float(os.getenv("ANOMALY_HEALTH_DELAY", "3.0"))
 
+# How long to keep reporting the same anomaly classification once detected (seconds).
+# Reduces flicker; classification must hold for this duration before re-evaluating.
+ANOMALY_HOLD_SECONDS: float = float(os.getenv("ANOMALY_HOLD_SECONDS", "5.0"))
+
 # Latest health data pushed from the Flutter app via POST /pose/health-push
 _latest_health: dict | None = None
 
@@ -59,6 +63,12 @@ _latest_anomaly: dict[str, Any] = {
     "anomaly_type": "",
     "timestamp": None,
 }
+
+# Anomaly session: features over time while anomaly is detected (written by bg loop).
+# On deactivate this is copied to _last_anomaly_session for GET /pose/anomaly-session.
+MAX_ANOMALY_SAMPLES: int = 600  # ~200 s at 3 fps
+_anomaly_session_samples: list[dict[str, Any]] = []
+_last_anomaly_session: dict[str, Any] | None = None
 
 
 def _get_ble_data() -> list[dict]:
@@ -217,6 +227,10 @@ def _bg_loop():
     health_fetched_this_episode = False
     health_snapshot: dict | None = None
 
+    # sticky classification: hold a detected anomaly type for ANOMALY_HOLD_SECONDS
+    sticky_anomaly_type = ""
+    sticky_anomaly_until = 0.0
+
     eng_names = ["nose_y", "hip_y", "torso_len", "full_height",
                  "shoulder_angle", "knee_angle", "vertical_ratio"]
     joint_map = [
@@ -256,6 +270,8 @@ def _bg_loop():
             score = 0.0
             is_anomaly = False
             anomaly_type = ""
+            sticky_anomaly_type = ""
+            sticky_anomaly_until = 0.0
             label = "Waiting for buffer..."
 
         if not is_active:
@@ -366,12 +382,24 @@ def _bg_loop():
                         anomaly_type = ""
                         anomaly_start_t = None
                         health_fetched_this_episode = False
+
+                # Hold classification for ANOMALY_HOLD_SECONDS to reduce flicker
+                now_loop = time.time()
+                if is_anomaly and anomaly_type:
+                    sticky_anomaly_type = anomaly_type
+                    sticky_anomaly_until = now_loop + ANOMALY_HOLD_SECONDS
         else:
             label = "No person detected" if not detections else "Target lost — re-locking..."
             last_joints = {}
             last_eng = {}
 
         now = time.time()
+        # Every frame: report held classification if still within hold window
+        if now < sticky_anomaly_until and sticky_anomaly_type:
+            is_anomaly = True
+            anomaly_type = sticky_anomaly_type
+            if label != "ANOMALY DETECTED":
+                label = "ANOMALY DETECTED"
         dt = max(now - prev_t, 1e-6)
         fps = 0.9 * fps + 0.1 / dt
         prev_t = now
@@ -405,6 +433,18 @@ def _bg_loop():
             _latest_anomaly["is_anomaly"] = is_anomaly
             _latest_anomaly["anomaly_type"] = anomaly_type
             _latest_anomaly["timestamp"] = round(time.time(), 3) if is_anomaly else _latest_anomaly.get("timestamp")
+            # Record features over time during anomaly (for graphs after deactivate)
+            if is_anomaly and last_eng:
+                sample = {
+                    "t": round(time.time(), 3),
+                    "score": round(score, 6),
+                    "threshold": round(threshold, 6),
+                    "anomaly_type": anomaly_type,
+                    **{k: (v if isinstance(v, (int, float)) else float(v)) for k, v in last_eng.items()},
+                }
+                _anomaly_session_samples.append(sample)
+                if len(_anomaly_session_samples) > MAX_ANOMALY_SAMPLES:
+                    _anomaly_session_samples.pop(0)
 
 
 _thread_started = False
@@ -423,6 +463,8 @@ def _ensure_bg():
 @router.post("/pose/activate")
 async def pose_activate():
     _ensure_bg()
+    with _lock:
+        _anomaly_session_samples.clear()
     _active.set()
     _request_relock.set()
     return {"status": "activated", "info": "BLE lock-on triggered"}
@@ -431,6 +473,17 @@ async def pose_activate():
 @router.post("/pose/deactivate")
 async def pose_deactivate():
     _active.clear()
+    with _lock:
+        global _last_anomaly_session
+        if _anomaly_session_samples:
+            last_type = _anomaly_session_samples[-1].get("anomaly_type", "")
+            _last_anomaly_session = {
+                "anomaly_type": last_type,
+                "samples": list(_anomaly_session_samples),
+            }
+        else:
+            _last_anomaly_session = None
+        _anomaly_session_samples.clear()
     return {"status": "deactivated", "info": "Tracking stopped"}
 
 
@@ -450,6 +503,52 @@ async def get_anomaly_signal():
     with _lock:
         out = dict(_latest_anomaly)
     return out
+
+
+@router.get("/pose/anomaly-session")
+async def get_anomaly_session():
+    """
+    Return the last anomaly session (features over time) after deactivation.
+    Used by the Flutter app to graph limb/pose features that indicated the anomaly.
+    Returns 200 with { anomaly_type, samples: [{ t, score, threshold, nose_y, hip_y, ... }] }
+    or 204 when no session is available.
+    """
+    with _lock:
+        session = _last_anomaly_session
+    if session is None:
+        return Response(status_code=204)
+    return session
+
+
+@router.get("/pose/extrapolate")
+async def get_extrapolate():
+    """
+    Use the last anomaly session (graph data + classification), send it to Gemini as JSON,
+    and return Gemini's extrapolation of what the limbs/posture are doing.
+    Call after deactivate when anomaly-session is available. Returns 204 if no session.
+    """
+    with _lock:
+        session = _last_anomaly_session
+    if session is None or not session.get("samples"):
+        return Response(status_code=204)
+    anomaly_type = session.get("anomaly_type") or "UNKNOWN"
+    samples = session.get("samples") or []
+    try:
+        from routers import ai_config
+        text = await asyncio.to_thread(
+            ai_config.extrapolate_from_graph_data,
+            anomaly_type,
+            samples,
+        )
+        return {"extrapolation": text, "anomaly_type": anomaly_type}
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return {
+            "extrapolation": "",
+            "anomaly_type": anomaly_type,
+            "error": str(e),
+        }
 
 
 # ── Health data push (from Flutter app) ──
@@ -591,9 +690,9 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   .watch-status{font-size:11px;font-weight:600;margin-top:4px;text-transform:uppercase;letter-spacing:0.5px}
   .watch-item.active .watch-status{color:#EEFF5D}
   .watch-item:not(.active) .watch-status{color:#FE5F55}
-  .modal-overlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,0.7);z-index:1000;align-items:center;justify-content:center;padding:20px}
+  .modal-overlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,0.7);z-index:1000;align-items:center;justify-content:center;padding:20px;overflow-y:auto}
   .modal-overlay.show{display:flex}
-  .modal-box{background:#3d484a;border:2px solid #FE5F55;border-radius:10px;padding:24px;min-width:320px;max-width:400px;box-shadow:0 0 0 2px rgba(254,95,85,0.3),0 8px 32px rgba(0,0,0,0.5)}
+  .modal-box{background:#3d484a;border:2px solid #FE5F55;border-radius:10px;padding:24px;min-width:320px;max-width:640px;width:100%;max-height:90vh;overflow-y:auto;box-shadow:0 0 0 2px rgba(254,95,85,0.3),0 8px 32px rgba(0,0,0,0.5)}
   .modal-box h3{font-size:16px;color:#B8D8D8;margin-bottom:16px}
   .modal-box label{display:block;font-size:12px;color:#7A9E9F;margin-bottom:6px}
   .modal-box input[type=email]{width:100%;padding:10px 12px;border:1px solid #4F6367;border-radius:6px;background:#2a3234;color:#B8D8D8;font-size:14px;margin-bottom:16px;box-sizing:border-box}
@@ -604,19 +703,40 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   .modal-btn.cancel:hover{background:#7A9E9F}
   .modal-btn.send{background:#FE5F55;color:#fff}
   .modal-btn.send:hover{background:#e54d43}
+  .report-modal-graphs{background:#2a3234;border-radius:8px;padding:14px;margin-bottom:20px;border:1px solid #4F6367}
+  .report-modal-graphs h4{font-size:13px;color:#EEFF5D;margin:0 0 12px 0}
+  .report-modal-graphs .chart-wrap{margin-bottom:16px}
+  .report-modal-graphs .chart-wrap:last-child{margin-bottom:0}
+  .report-modal-graphs .chart-wrap canvas{max-height:140px;width:100%!important}
+  .report-modal-graphs .no-session{color:#7A9E9F;font-size:13px;text-align:center;padding:12px}
+  .report-modal-graphs .loading{color:#7A9E9F;font-size:13px;text-align:center;padding:12px}
+  .report-modal-extrapolation{background:#2a3234;border-radius:8px;padding:14px;margin-bottom:20px;border:1px solid #4F6367}
+  .report-modal-extrapolation h4{font-size:13px;color:#EEFF5D;margin:0 0 10px 0}
+  .report-modal-extrapolation .extrapolation-text{font-size:12px;color:#B8D8D8;line-height:1.5;white-space:pre-wrap}
+  .report-modal-extrapolation .loading{color:#7A9E9F;font-size:12px}
+  .report-modal-email{border-top:1px solid #4F6367;padding-top:16px;margin-top:8px}
 </style>
 </head>
 <body>
 
-<!-- Deactivate report popup -->
+<!-- Deactivate report popup: graphs (session) + email at bottom -->
 <div class="modal-overlay" id="reportModal">
   <div class="modal-box">
-    <h3>Send deactivation report</h3>
-    <label for="reportEmail">Email address</label>
-    <input type="email" id="reportEmail" placeholder="you@example.com" />
-    <p id="reportModalMessage" style="margin-top:10px;font-size:12px;min-height:18px;color:#7A9E9F"></p>
-    <div class="modal-actions">
-      <button type="button" class="modal-btn send" id="modalSendReport">Send report</button>
+    <div id="reportModalGraphs" class="report-modal-graphs">
+      <div class="loading" id="reportModalGraphsContent">Loading session...</div>
+    </div>
+    <div id="reportModalExtrapolation" class="report-modal-extrapolation">
+      <h4>AI extrapolation (Gemini)</h4>
+      <div id="reportModalExtrapolationContent" class="extrapolation-text">Loading…</div>
+    </div>
+    <div class="report-modal-email">
+      <h3>Send deactivation report</h3>
+      <label for="reportEmail">Email address</label>
+      <input type="email" id="reportEmail" placeholder="you@example.com" />
+      <p id="reportModalMessage" style="margin-top:10px;font-size:12px;min-height:18px;color:#7A9E9F"></p>
+      <div class="modal-actions">
+        <button type="button" class="modal-btn send" id="modalSendReport">Send report</button>
+      </div>
     </div>
   </div>
 </div>
@@ -747,6 +867,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   </div>
 </div>
 
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
 <script>
 const FEAT_LABELS = {
   nose_y: "Nose Y",
@@ -890,12 +1011,143 @@ let reportEmail = null;
 const reportModal = document.getElementById("reportModal");
 const reportEmailInput = document.getElementById("reportEmail");
 const modalSendReport = document.getElementById("modalSendReport");
+const reportModalGraphsContent = document.getElementById("reportModalGraphsContent");
+
+let reportModalCharts = [];
 
 function openReportModal() {
   reportEmailInput.value = "";
   document.getElementById("reportModalMessage").textContent = "";
+  reportModalGraphsContent.innerHTML = '<div class="loading">Loading session...</div>';
   reportModal.classList.add("show");
+  reportModalCharts.forEach(function(c) { if (c) c.destroy(); });
+  reportModalCharts = [];
+  var extrapolationEl = document.getElementById("reportModalExtrapolation");
+  var extrapolationContent = document.getElementById("reportModalExtrapolationContent");
+  extrapolationEl.style.display = "block";
+  extrapolationContent.textContent = "Loading extrapolation...";
+
+  fetch("/pose/anomaly-session")
+    .then(function(r) {
+      if (r.status === 204 || !r.ok) {
+        reportModalGraphsContent.innerHTML = '<div class="no-session">No anomaly data from this session.</div>';
+        return;
+      }
+      return r.json();
+    })
+    .then(function(session) {
+      if (!session || !session.samples || session.samples.length < 2) {
+        reportModalGraphsContent.innerHTML = '<div class="no-session">No anomaly data from this session.</div>';
+        return;
+      }
+      renderSessionCharts(session);
+    })
+    .catch(function() {
+      reportModalGraphsContent.innerHTML = '<div class="no-session">Could not load session data.</div>';
+    });
+
+  fetch("/pose/extrapolate")
+    .then(function(r) {
+      if (r.status === 204 || !r.ok) {
+        extrapolationContent.textContent = "No AI extrapolation for this session (no anomaly data or endpoint unavailable).";
+        return r.text().then(function() { return null; });
+      }
+      return r.json();
+    })
+    .then(function(data) {
+      if (!data) return;
+      if (data.error) {
+        extrapolationContent.textContent = "AI extrapolation failed: " + data.error;
+        return;
+      }
+      if (data.extrapolation) {
+        extrapolationContent.textContent = data.extrapolation;
+      } else {
+        extrapolationContent.textContent = "No AI extrapolation for this session.";
+      }
+    })
+    .catch(function() {
+      extrapolationContent.textContent = "Could not load AI extrapolation. Check GOOGLE_API_KEY and backend logs.";
+    });
+
   reportEmailInput.focus();
+}
+
+function renderSessionCharts(session) {
+  var samples = session.samples;
+  var t0 = samples[0].t;
+  var anomalyType = session.anomaly_type || "UNKNOWN";
+  var html = '<h4>Anomaly: ' + anomalyType + ' — features over time</h4>';
+  var chartIdPrefix = "reportChart_";
+  var labels = samples.map(function(s) { return (s.t - t0).toFixed(1); });
+
+  function addChart(title, key, yAxisLabel) {
+    var id = chartIdPrefix + key.replace(/[^a-z0-9]/gi, "_");
+    html += '<div class="chart-wrap"><canvas id="' + id + '" height="120"></canvas></div>';
+    return id;
+  }
+  var ids = [];
+  ids.push(addChart("Score", "score", "score"));
+  if (samples[0].nose_y != null) ids.push(addChart("Nose Y", "nose_y", "nose_y"));
+  if (samples[0].hip_y != null) ids.push(addChart("Hip Y", "hip_y", "hip_y"));
+  if (samples[0].knee_angle != null) ids.push(addChart("Knee angle (°)", "knee_angle", "°"));
+  if (samples[0].vertical_ratio != null) ids.push(addChart("Vertical ratio", "vertical_ratio", "ratio"));
+  if (samples[0].shoulder_angle != null) ids.push(addChart("Shoulder angle (°)", "shoulder_angle", "°"));
+
+  reportModalGraphsContent.innerHTML = html;
+
+  var thresh = samples[0].threshold;
+  var scoreData = samples.map(function(s) { return s.score; });
+  var thresholdData = samples.map(function() { return thresh; });
+  var lineColor = "rgba(238, 255, 93, 1)";
+  var lineColorFill = "rgba(238, 255, 93, 0.15)";
+  var gridColor = "rgba(122, 158, 159, 0.4)";
+
+  if (window.Chart && document.getElementById(chartIdPrefix + "score")) {
+    reportModalCharts.push(new Chart(document.getElementById(chartIdPrefix + "score"), {
+      type: "line",
+      data: {
+        labels: labels,
+        datasets: [
+          { label: "Score", data: scoreData, borderColor: lineColor, backgroundColor: lineColorFill, fill: true, tension: 0.3 },
+          { label: "Threshold", data: thresholdData, borderColor: "rgba(254, 95, 85, 0.9)", borderDash: [4, 2], fill: false, tension: 0 }
+        ]
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        plugins: { legend: { labels: { color: "#B8D8D8", font: { size: 11 } } } },
+        scales: {
+          x: { ticks: { color: "#7A9E9F", maxTicksLimit: 8 }, grid: { color: gridColor } },
+          y: { ticks: { color: "#7A9E9F" }, grid: { color: gridColor } }
+        }
+      }
+    }));
+  }
+
+  ["nose_y", "hip_y", "knee_angle", "vertical_ratio", "shoulder_angle"].forEach(function(key) {
+    if (samples[0][key] == null) return;
+    var id = chartIdPrefix + key.replace(/[^a-z0-9]/gi, "_");
+    var el = document.getElementById(id);
+    if (!el || !window.Chart) return;
+    var data = samples.map(function(s) { return s[key]; });
+    reportModalCharts.push(new Chart(el, {
+      type: "line",
+      data: {
+        labels: labels,
+        datasets: [{ label: key, data: data, borderColor: lineColor, backgroundColor: lineColorFill, fill: true, tension: 0.3 }]
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        plugins: { legend: { labels: { color: "#B8D8D8", font: { size: 11 } } } },
+        scales: {
+          x: { ticks: { color: "#7A9E9F", maxTicksLimit: 8 }, grid: { color: gridColor } },
+          y: { ticks: { color: "#7A9E9F" }, grid: { color: gridColor } }
+        }
+      }
+    }));
+  });
 }
 function closeReportModal() {
   reportModal.classList.remove("show");

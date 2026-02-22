@@ -68,19 +68,23 @@ class FeatureEngineer:
         nose_y = nose[1]
         hip_y = hip_mid[1]
         torso_len = float(np.linalg.norm(shoulder_mid - hip_mid))
-        full_height = float(np.linalg.norm(nose - ankle_mid))
+        # Match training: vertical extent (ankle_y - nose_y), not Euclidean distance
+        full_height = float(ankle_mid[1] - nose[1])
 
-        shoulder_angle = (
-            _joint_angle(l_el, l_sh, l_hp) +
-            _joint_angle(r_el, r_sh, r_hp)
-        ) / 2
+        # Match training: angle of shoulder line (L→R) via arctan2, not elbow-shoulder-hip angles
+        shoulder_angle = float(
+            np.arctan2(r_sh[1] - l_sh[1], r_sh[0] - l_sh[0])
+        )
 
         knee_angle = (
             _joint_angle(l_hp, l_kn, l_ak) +
             _joint_angle(r_hp, r_kn, r_ak)
         ) / 2
 
-        vertical_ratio = torso_len / (full_height + 1e-8)
+        # Match training: std(x) / std(y) (spread ratio), not torso_len/full_height
+        vertical_ratio = float(
+            np.std(xy[:, 0]) / (np.std(xy[:, 1]) + 1e-6)
+        )
 
         engineered = np.array([
             nose_y, hip_y, torso_len, full_height,

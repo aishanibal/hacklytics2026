@@ -1,5 +1,6 @@
-package com.flutter_app.watch
+package com.flutter_app
 
+import com.flutter_app.R
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
@@ -48,6 +49,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.wear.compose.material.Text
+import android.util.Log
 import com.google.android.gms.wearable.Wearable
 import kotlinx.coroutines.delay
 
@@ -286,13 +288,37 @@ fun AlertScreen(isRedState: MutableState<Boolean>, onTripleTap: () -> Unit) {
     }
 }
 
+private const val TAG_WATCH = "WatchMainActivity"
+private const val MESSAGE_PATH = "/state_update"
+
+/**
+ * Send a message from watch to phone via Wearable MessageClient.
+ * Phone receives it in PhoneMessageService (WearableListenerService) and broadcasts to Flutter.
+ */
 fun sendMessageToPhone(context: Context, path: String, data: String) {
-    Wearable.getNodeClient(context).connectedNodes.addOnSuccessListener { nodes ->
-        for (node in nodes) {
-            Wearable.getMessageClient(context)
-                .sendMessage(node.id, path, data.toByteArray())
+    Log.d(TAG_WATCH, "sendMessageToPhone: path=$path data=$data")
+    val messageClient = Wearable.getMessageClient(context)
+    Wearable.getNodeClient(context).connectedNodes
+        .addOnSuccessListener { nodes ->
+            Log.d(TAG_WATCH, "Connected nodes: ${nodes.size}")
+            if (nodes.isEmpty()) {
+                Log.e(TAG_WATCH, "No connected nodes — phone may not be paired or remote connection off")
+                return@addOnSuccessListener
+            }
+            // Prefer the "nearby" node (phone when connected via Bluetooth)
+            val targetNode = nodes.firstOrNull { it.isNearby } ?: nodes.first()
+            Log.d(TAG_WATCH, "Sending to node: ${targetNode.displayName} id=${targetNode.id} nearby=${targetNode.isNearby}")
+            messageClient.sendMessage(targetNode.id, path, data.toByteArray())
+                .addOnSuccessListener {
+                    Log.d(TAG_WATCH, "SUCCESS: Sent '$data' to phone")
+                }
+                .addOnFailureListener { e ->
+                    Log.e(TAG_WATCH, "FAILED to send to phone: ${e.message}")
+                }
         }
-    }
+        .addOnFailureListener { e ->
+            Log.e(TAG_WATCH, "getConnectedNodes failed: ${e.message}")
+        }
 }
 
 @Composable

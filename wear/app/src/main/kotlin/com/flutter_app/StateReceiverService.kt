@@ -1,4 +1,4 @@
-package com.flutter_app.watch
+package com.flutter_app
 
 import android.content.Intent
 import android.util.Log

@@ -5,11 +5,11 @@ plugins {
 }
 
 android {
-    namespace = "com.flutter_app.watch"
+    namespace = "com.flutter_app"
     compileSdk = 35
 
     defaultConfig {
-        applicationId = "com.flutter_app.watch"
+        applicationId = "com.flutter_app"
         minSdk = 26
         targetSdk = 35
         versionCode = 1

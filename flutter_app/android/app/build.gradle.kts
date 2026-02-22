@@ -1,5 +1,3 @@
-import org.jetbrains.kotlin.gradle.dsl.JvmTarget
-
 plugins {
     id("com.android.application")
     id("kotlin-android")
@@ -17,9 +15,13 @@ android {
         targetCompatibility = JavaVersion.VERSION_17
     }
 
+    kotlinOptions {
+        jvmTarget = JavaVersion.VERSION_17.toString()
+    }
+
     defaultConfig {
         applicationId = "com.flutter_app"
-        // Health Connect requires API 26+
+        // Health Cgitonnect requires API 26+
         minSdk = 26
         targetSdk = flutter.targetSdkVersion
         versionCode = flutter.versionCode
@@ -35,19 +37,16 @@ android {
     }
 }
 
-kotlin {
-    compilerOptions {
-        jvmTarget.set(JvmTarget.JVM_17)
-    }
-}
-
 flutter {
     source = "../.."
 }
 
 dependencies {
-    implementation("androidx.appcompat:appcompat:1.6.1")
+    // Health Connect — replaces deprecated Google Fit APIs
     implementation("androidx.health.connect:connect-client:1.1.0-rc01")
+    // Coroutines for async sensor reads
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3")
-    implementation(fileTree(mapOf("dir" to "libs", "include" to listOf("*.aar"))))
+    implementation("androidx.appcompat:appcompat:1.6.1")
+    // Wearable Data Layer — phone ↔ watch messaging
+    implementation("com.google.android.gms:play-services-wearable:18.2.0")
 }

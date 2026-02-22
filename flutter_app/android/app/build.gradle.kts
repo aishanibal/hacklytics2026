@@ -49,4 +49,5 @@ dependencies {
     implementation("androidx.appcompat:appcompat:1.6.1")
     implementation("androidx.health.connect:connect-client:1.1.0-rc01")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3")
+    implementation fileTree(dir: "libs", include: ["*.aar"])
 }

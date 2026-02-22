@@ -1,7 +1,8 @@
+import os
 import time
 import uuid
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter
 from openai import AsyncOpenAI
 
 from schemas.incident_report import IncidentReport
@@ -9,7 +10,6 @@ from schemas.sensor_payload import ReportRequest
 
 router = APIRouter(prefix="/report", tags=["report"])
 
-client = AsyncOpenAI()  # reads OPENAI_API_KEY from environment
 
 
 @router.post("/generate", response_model=IncidentReport)
@@ -45,19 +45,21 @@ async def generate_report(request: ReportRequest) -> IncidentReport:
         "vitals_assessment, cv_assessment, recommended_action."
     )
 
-    try:
-        response = await client.chat.completions.create(
-            model="gpt-4o-mini",
-            temperature=0.3,  # TODO: fine-tune — lower for more deterministic triage
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
-            ],
-        )
-        llm_text = response.choices[0].message.content or ""
-    except Exception as exc:
-        # HACKATHON: simplify — fall back to a canned report rather than failing hard
-        llm_text = ""
+    llm_text = ""
+    client = _get_client()
+    if client:
+        try:
+            response = await client.chat.completions.create(
+                model="gpt-4o-mini",
+                temperature=0.3,  # TODO: fine-tune — lower for more deterministic triage
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+            )
+            llm_text = response.choices[0].message.content or ""
+        except Exception:
+            pass  # fall back to stub report
 
     parsed = _parse_llm_response(llm_text, request)
 

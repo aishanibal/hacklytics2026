@@ -10,13 +10,13 @@ environment:
 dependencies:
   flutter:
     sdk: flutter
+  wear: 1.1.0
 
   # State management
   flutter_riverpod: ^2.5.1
   riverpod_annotation: ^2.3.5
 
   # Networking
-  http: ^1.2.1
   web_socket_channel: ^3.0.0
 
   # Charts

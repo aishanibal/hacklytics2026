@@ -174,12 +174,8 @@ fun WatchApp(
     }
 
     val activity = LocalContext.current as? ComponentActivity
-    LaunchedEffect(state) {
-        if (state == WatchState.IDLE) {
-            activity?.window?.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-        } else {
-            activity?.window?.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-        }
+    LaunchedEffect(Unit) {
+        activity?.window?.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
     }
 
     val backgroundBrush = when (state) {

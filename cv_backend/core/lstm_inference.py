@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 
 import numpy as np
@@ -28,7 +29,9 @@ class AnomalyPredictor:
 
         self.mean: torch.Tensor = checkpoint["mean"].to(self.device)
         self.std: torch.Tensor = checkpoint["std"].to(self.device)
-        self.threshold: float = checkpoint["anomaly_threshold"].item()
+        default_threshold: float = checkpoint["anomaly_threshold"].item()
+        override = os.getenv("ANOMALY_THRESHOLD", "").strip()
+        self.threshold: float = float(override) if override else default_threshold
 
         self.window_size: int = self.pipeline_config["window_size"]
         self.num_features: int = self.pipeline_config["num_features"]

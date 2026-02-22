@@ -6,8 +6,8 @@ import '../models/biometric_data.dart';
 import '../models/incident_report.dart';
 
 class CvService {
-  // TODO: update host to your FastAPI server IP/hostname
-  static const String _wsBaseUrl = 'ws://192.168.1.100:8000';
+  // Your computer (backend); Pi is 10.136.28.70
+  static const String _wsBaseUrl = 'ws://10.136.4.45:8000';
 
   WebSocketChannel? _channel;
   Stream<Map<String, dynamic>>? _resultStream;

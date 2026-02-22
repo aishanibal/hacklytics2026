@@ -1,42 +1,41 @@
-import 'package:flutter/services.dart';
+import 'dart:async';
 
 import '../models/biometric_data.dart';
 
+/// Placeholder stream: no health or accelerometer data. Emits periodic snapshots for the dashboard/backend.
 class SensorService {
-  static const MethodChannel _methodChannel =
-      MethodChannel('com.yourapp/samsung_health');
+  StreamController<BiometricData>? _controller;
+  Timer? _pollTimer;
 
-  static const EventChannel _eventChannel =
-      EventChannel('com.yourapp/sensor_stream');
-
-  Stream<BiometricData>? _sensorStream;
-
-  /// Start the Health Connect polling loop on the Kotlin side.
   Future<void> startListening() async {
-    try {
-      await _methodChannel.invokeMethod<void>('startListening');
-    } on PlatformException catch (e) {
-      // TODO: surface this error to the UI via a Riverpod provider
-      // ignore: avoid_print
-      print('SensorService.startListening error: ${e.message}');
-    }
+    _controller ??= StreamController<BiometricData>.broadcast();
+    if (_pollTimer != null) return;
+
+    _pollTimer = Timer.periodic(const Duration(seconds: 2), (_) => _emitSnapshot());
+    _emitSnapshot();
   }
 
-  /// Stop the polling loop.
-  Future<void> stopListening() async {
-    try {
-      await _methodChannel.invokeMethod<void>('stopListening');
-    } on PlatformException catch (_) {
-      // Sensor unavailable — fail silently, never crash
-    }
+  void _emitSnapshot() {
+    _controller?.add(BiometricData(
+      heartRate: null,
+      hrv: null,
+      spo2: null,
+      accelX: 0,
+      accelY: 0,
+      accelZ: 0,
+      timestamp: DateTime.now().millisecondsSinceEpoch,
+    ));
   }
 
-  /// Continuous stream of biometric readings from the watch.
+  void stopListening() {
+    _pollTimer?.cancel();
+    _pollTimer = null;
+    _controller?.close();
+    _controller = null;
+  }
+
   Stream<BiometricData> get sensorStream {
-    _sensorStream ??= _eventChannel
-        .receiveBroadcastStream()
-        .where((event) => event is Map)
-        .map((event) => BiometricData.fromMap(Map<String, dynamic>.from(event as Map)));
-    return _sensorStream!;
+    _controller ??= StreamController<BiometricData>.broadcast();
+    return _controller!.stream;
   }
 }

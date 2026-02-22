@@ -21,7 +21,7 @@ from typing import Any
 import cv2
 import numpy as np
 import requests as http_requests
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, StreamingResponse
 
 from core.keypoint_extractor import KeypointExtractor
@@ -39,73 +39,111 @@ FRAME_STEP: int = int(os.getenv("FRAME_STEP", "0"))  # 0 = use model config
 # ── BLE config ──
 BLE_DATA_URL: str = os.getenv("BLE_DATA_URL", "http://10.136.28.70:5000/ble-data")
 USE_TEST_BLE: bool = os.getenv("USE_TEST_BLE", "true").lower() in ("1", "true", "yes")
-TARGET_BLE_NAME: str = os.getenv("TARGET_BLE_NAME", "TARGET_A15")
+# The Pi's ble_config.py already filters to only the target UUID,
+# so the response list only ever contains the target device.
+TARGET_BLE_UUID: str = os.getenv("TARGET_BLE_UUID", "a91c8e72-6b91-4f92-9c9b-6bafcd2e1d13")
 
 TEST_BLE_REQUESTS = [
-    {"name": "TARGET_A15", "UUID": "a91c8e72-6b91-4f92-9c9b-6bafcd2e1d13", "mac-address": "AA:BB:CC:DD:EE:01", "distance": 2.5},
-    {"name": "Device_02", "UUID": "b82d9f83-7ca2-5g03-0d0c-7cbgde3f2e24", "mac-address": "AA:BB:CC:DD:EE:02", "distance": 3.1},
-    {"name": "Device_03", "UUID": "c93e0g94-8db3-6h14-1e1d-8dchef4g3f35", "mac-address": "AA:BB:CC:DD:EE:03", "distance": 1.8},
+    {"UUID": "a91c8e72-6b91-4f92-9c9b-6bafcd2e1d13", "address": "AA:BB:CC:DD:EE:01", "distance": 2.5},
 ]
+
+# ── Health Connect config ──
+ANOMALY_HEALTH_DELAY: float = float(os.getenv("ANOMALY_HEALTH_DELAY", "3.0"))
+
+# Latest health data pushed from the Flutter app via POST /pose/health-push
+_latest_health: dict | None = None
+
+# Latest anomaly signal (written by bg loop, read by GET /pose/anomaly)
+_latest_anomaly: dict[str, Any] = {
+    "is_anomaly": False,
+    "anomaly_type": "",
+    "timestamp": None,
+}
 
 
 def _get_ble_data() -> list[dict]:
-    """Fetch BLE device list (test or live API)."""
+    """Fetch BLE device list from the Pi API."""
     if USE_TEST_BLE:
         return TEST_BLE_REQUESTS
     try:
-        r = http_requests.get(BLE_DATA_URL, timeout=2)
+        r = http_requests.get(BLE_DATA_URL, timeout=8)
         if r.status_code != 200:
-            return TEST_BLE_REQUESTS
+            print(f"[ble] API returned {r.status_code}")
+            return []
         data = r.json()
         if isinstance(data, list):
             return data
-        raw = data.get("Requests") or data.get("requests") or []
-        return raw if isinstance(raw, list) else TEST_BLE_REQUESTS
-    except Exception:
-        return TEST_BLE_REQUESTS
+        raw = (data.get("devices") or data.get("Requests")
+               or data.get("requests") or [])
+        print(f"[ble] Got {len(raw)} device(s): {raw}")
+        return raw if isinstance(raw, list) else []
+    except Exception as exc:
+        print(f"[ble] Fetch failed: {exc}")
+        return []
 
 
 
-# Calibration constant: person at D meters has bbox height ≈ FOCAL_HEIGHT / D pixels.
-# Tune for your camera: measure someone's bbox height at a known distance,
-# then FOCAL_HEIGHT = distance_meters * bbox_height_pixels.
-# e.g. person at 2m with bbox height 300px → FOCAL_HEIGHT = 600
-FOCAL_HEIGHT: float = float(os.getenv("FOCAL_HEIGHT", "600"))
+# FOCAL_HEIGHT = focal_length_px * avg_person_height
+# Computed automatically from frame dimensions + camera vertical FoV.
+# Override with FOCAL_HEIGHT env var if you know yours exactly.
+CAMERA_VFOV: float = float(os.getenv("CAMERA_VFOV", "124"))   # degrees (110° HFOV → ~124° VFOV at 640x880)
+AVG_PERSON_HEIGHT: float = 1.55                                # meters
+_focal_height: float = float(os.getenv("FOCAL_HEIGHT", "0"))
+_focal_initialized: bool = _focal_height > 0
 
 
-def _match_target(detections: list[dict], ble_devices: list[dict],
-                  target_name: str) -> tuple[dict | None, float | None]:
+def _init_focal_from_frame(frame_h: int):
+    """Estimate FOCAL_HEIGHT from the frame height and camera vertical FoV."""
+    global _focal_height, _focal_initialized
+    if _focal_initialized:
+        return
+    vfov_rad = math.radians(CAMERA_VFOV)
+    focal_px = frame_h / (2 * math.tan(vfov_rad / 2))
+    _focal_height = focal_px * AVG_PERSON_HEIGHT
+    _focal_initialized = True
+    print(f"[pose] Initial FOCAL_HEIGHT = {_focal_height:.0f} "
+          f"(frame_h={frame_h}, VFoV={CAMERA_VFOV}°)")
+
+
+def _refine_focal(ble_dist: float, bbox_h: float):
+    """Refine FOCAL_HEIGHT after a successful BLE match."""
+    global _focal_height
+    new_focal = ble_dist * bbox_h
+    _focal_height = new_focal
+    print(f"[pose] Refined FOCAL_HEIGHT = {_focal_height:.0f} "
+          f"(BLE {ble_dist:.2f}m × {bbox_h:.0f}px)")
+
+
+def _match_target(detections: list[dict],
+                  ble_devices: list[dict]) -> tuple[dict | None, float | None]:
     """
-    Use BLE distance to pick the person in the crowd whose bbox-estimated
-    distance best matches the BLE-reported distance.
-    Returns (detection, ble_distance) or (None, None).
+    The Pi's BLE scan already filters to only the target UUID,
+    so ble_devices contains at most one entry — the target.
+    Pick the person whose bbox-estimated distance best matches that BLE distance.
+    After matching, refine FOCAL_HEIGHT from the result.
     """
-    if not detections:
+    if not detections or not ble_devices:
         return None, None
 
-    target_ble = None
-    for b in ble_devices:
-        if (b.get("name") or "") == target_name:
-            target_ble = b
-            break
+    ble_dist = float(ble_devices[0].get("distance", 999))
+    print(f"[ble] Target distance = {ble_dist:.2f}m  |  "
+          f"FOCAL = {_focal_height:.0f}  |  persons = {len(detections)}")
 
-    if target_ble is None:
-        return None, None
-
-    ble_dist = float(target_ble.get("distance", 999))
-
-    # estimate each person's distance from camera using bbox height
-    # then pick the one closest to the BLE distance
     best: dict | None = None
     best_diff = float("inf")
     for det in detections:
         x1, y1, x2, y2 = det["bbox"]
         bbox_h = max(y2 - y1, 1)
-        estimated_dist = FOCAL_HEIGHT / bbox_h
+        estimated_dist = _focal_height / bbox_h
         diff = abs(estimated_dist - ble_dist)
+        print(f"  bbox_h={bbox_h:.0f}  est={estimated_dist:.2f}m  diff={diff:.2f}")
         if diff < best_diff:
             best_diff = diff
             best = det
+
+    if best is not None:
+        bx1, by1, bx2, by2 = best["bbox"]
+        _refine_focal(ble_dist, max(by2 - by1, 1))
 
     return best, ble_dist
 
@@ -174,6 +212,11 @@ def _bg_loop():
     lost_count = 0
     tracking_mode = "INACTIVE"
 
+    # health data pull state
+    anomaly_start_t: float | None = None
+    health_fetched_this_episode = False
+    health_snapshot: dict | None = None
+
     eng_names = ["nose_y", "hip_y", "torso_len", "full_height",
                  "shoulder_angle", "knee_angle", "vertical_ratio"]
     joint_map = [
@@ -194,6 +237,9 @@ def _bg_loop():
 
         frame_count += 1
         fh, fw = frame.shape[:2]
+
+        if frame_count == 1:
+            _init_focal_from_frame(fh)
 
         detections = extractor.extract_all(frame)
         annotated = frame.copy()
@@ -221,7 +267,7 @@ def _bg_loop():
             # ── LOCK-ON: fetch BLE, match target by distance ──
             tracking_mode = "LOCK-ON"
             ble_devices = _get_ble_data()
-            matched, matched_dist = _match_target(detections, ble_devices, TARGET_BLE_NAME)
+            matched, matched_dist = _match_target(detections, ble_devices)
             if matched is not None:
                 target = matched
                 target_bbox = matched["bbox"]
@@ -229,9 +275,11 @@ def _bg_loop():
                 lost_count = 0
                 tracking_mode = "TRACKING"
                 x1, y1, x2, y2 = matched["bbox"]
-                est = FOCAL_HEIGHT / max(y2 - y1, 1)
-                print(f"[pose] Locked onto {TARGET_BLE_NAME} "
-                      f"(BLE: {ble_dist:.1f}m, est: {est:.1f}m, bbox_h: {y2-y1:.0f}px)")
+                bbox_h = max(y2 - y1, 1)
+                est = _focal_height / bbox_h
+                print(f"[pose] Locked onto target "
+                      f"(BLE: {ble_dist:.1f}m, est: {est:.1f}m, bbox_h: {bbox_h:.0f}px, "
+                      f"FOCAL: {_focal_height:.0f})")
         else:
             # ── TRACKING: find best IoU match to previous bbox ──
             tracking_mode = "TRACKING"
@@ -269,7 +317,7 @@ def _bg_loop():
         if target is not None:
             kps_raw = target["keypoints"]
 
-            dist_label = f"{TARGET_BLE_NAME}"
+            dist_label = "BLE Target"
             if ble_dist is not None:
                 dist_label += f" {ble_dist:.1f}m"
 
@@ -306,9 +354,18 @@ def _bg_loop():
                     if is_anomaly:
                         label = "ANOMALY DETECTED"
                         anomaly_type, _ = classify_anomaly(window)
+                        if anomaly_start_t is None:
+                            anomaly_start_t = time.time()
+                        elif (not health_fetched_this_episode
+                              and time.time() - anomaly_start_t >= ANOMALY_HEALTH_DELAY):
+                            print(f"[health] Anomaly sustained {ANOMALY_HEALTH_DELAY}s — snapshotting health data")
+                            health_snapshot = _latest_health.copy() if _latest_health else None
+                            health_fetched_this_episode = True
                     else:
                         label = "Normal"
                         anomaly_type = ""
+                        anomaly_start_t = None
+                        health_fetched_this_episode = False
         else:
             label = "No person detected" if not detections else "Target lost — re-locking..."
             last_joints = {}
@@ -332,16 +389,22 @@ def _bg_loop():
             "buffer_size": buffer.window_size,
             "engineered": last_eng,
             "joints": last_joints,
-            "target_ble": TARGET_BLE_NAME,
+            "target_ble": TARGET_BLE_UUID,
             "ble_distance": round(ble_dist, 2) if ble_dist is not None else None,
             "persons_detected": len(detections),
             "tracking_mode": tracking_mode,
             "lost_count": lost_count,
+            "focal_height": round(_focal_height, 0),
+            "focal_initialized": _focal_initialized,
+            "health": health_snapshot,
         }
 
         with _lock:
             _state["jpeg"] = jpeg.tobytes()
             _state["telemetry"] = telemetry
+            _latest_anomaly["is_anomaly"] = is_anomaly
+            _latest_anomaly["anomaly_type"] = anomaly_type
+            _latest_anomaly["timestamp"] = round(time.time(), 3) if is_anomaly else _latest_anomaly.get("timestamp")
 
 
 _thread_started = False
@@ -374,6 +437,30 @@ async def pose_deactivate():
 @router.get("/pose/status")
 async def pose_status():
     return {"active": _active.is_set()}
+
+
+# ── Anomaly signal (for polling / webhooks) ──
+
+@router.get("/pose/anomaly")
+async def get_anomaly_signal():
+    """
+    Return the latest anomaly signal from the pose/LSTM pipeline.
+    Poll this to know when an anomaly is currently detected.
+    """
+    with _lock:
+        out = dict(_latest_anomaly)
+    return out
+
+
+# ── Health data push (from Flutter app) ──
+
+@router.post("/pose/health-push")
+async def health_push(request: Request):
+    """Accept health data pushed from the Flutter companion app."""
+    global _latest_health
+    body = await request.json()
+    _latest_health = body
+    return {"status": "ok"}
 
 
 # ── MJPEG ──
@@ -412,8 +499,9 @@ async def pose_ws(ws: WebSocket):
         while True:
             with _lock:
                 t = _state["telemetry"]
-            if t:
-                await ws.send_text(json.dumps(t))
+            # Always send so clients get at least is_anomaly/anomaly_type (e.g. Flutter app)
+            payload = t if t else {"is_anomaly": False, "anomaly_type": ""}
+            await ws.send_text(json.dumps(payload))
             await asyncio.sleep(0.15)
     except WebSocketDisconnect:
         pass
@@ -468,6 +556,19 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   .buf-fill{height:100%;background:linear-gradient(90deg,#7A9E9F,#EEFF5D);border-radius:4px;transition:width .3s}
   .fps{font-size:12px;color:#7A9E9F}
   .fps span{color:#EEFF5D;font-weight:600}
+  .health-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+  .health-metric{background:#252a38;border-radius:8px;padding:10px 12px;text-align:center}
+  .health-metric .h-label{font-size:11px;color:#8b92a8;text-transform:uppercase;letter-spacing:0.5px}
+  .health-metric .h-val{font-size:22px;font-weight:700;margin-top:2px;font-variant-numeric:tabular-nums}
+  .health-metric .h-unit{font-size:11px;color:#8b92a8;font-weight:400}
+  .health-metric.hr .h-val{color:#ef4444}
+  .health-metric.hrv .h-val{color:#f59e0b}
+  .health-metric.spo2 .h-val{color:#3b82f6}
+  .health-metric.accel .h-val{color:#8b5cf6;font-size:14px}
+  .health-alert{margin-top:8px;padding:6px 10px;border-radius:6px;font-size:12px;font-weight:600;text-align:center;display:none}
+  .health-alert.tachycardia{display:block;background:#7f1d1d;color:#fca5a5}
+  .health-alert.hrv-drop{display:block;background:#78350f;color:#fde68a}
+  .health-waiting{text-align:center;color:#8b92a8;font-size:12px;padding:8px}
   .watch-list{display:flex;flex-direction:column;gap:10px}
   .watch-item{display:flex;flex-direction:column;gap:2px;padding:12px 14px;background:#3d484a;border-radius:8px;border:2px solid #4F6367;box-shadow:0 2px 8px rgba(0,0,0,0.25);transition:border .2s,background .2s,box-shadow .2s}
   .watch-item.primary{border-color:#EEFF5D;background:rgba(238,255,93,0.08);box-shadow:0 0 0 1px rgba(238,255,93,0.3),0 2px 8px rgba(0,0,0,0.25)}
@@ -537,10 +638,10 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       <h2>Watches</h2>
       <div style="font-size:12px;color:#7A9E9F;margin-bottom:10px;display:flex;flex-wrap:wrap;gap:6px;align-items:center">
         Target: <span id="bleName">--</span> <span id="bleDist" style="color:#EEFF5D;font-weight:600">--</span>
-        &middot; Persons: <b id="personCount">0</b> &middot; Mode: <b id="trackMode">--</b>
+        &middot; Persons: <b id="personCount">0</b> &middot; Mode: <b id="trackMode">--</b> &middot; Focal: <b id="focalVal" style="color:#EEFF5D">uncalibrated</b>
       </div>
       <div class="watch-list" id="watchList">
-        <div class="watch-item primary active" data-watch-id="a91c8e72">
+        <div class="watch-item primary active" data-watch-id="a91c8e72" data-real-watch="true">
           <span class="watch-name">Watch A15</span>
           <span class="watch-uuid">a91c8e72-6b91-4f92-9c9b-6bafcd2e1d13</span>
           <span class="watch-status">Active</span>
@@ -593,6 +694,33 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       <div class="score-row">
         <span>Score: <b id="scoreVal">0</b></span>
         <span>Threshold: <b id="threshVal">0</b></span>
+      </div>
+    </div>
+
+    <!-- Health Data card -->
+    <div class="card" id="healthCard">
+      <h2>Health Connect</h2>
+      <div id="healthWaiting" class="health-waiting">Waiting for anomaly detection (3s)&hellip;</div>
+      <div id="healthData" style="display:none">
+        <div class="health-grid">
+          <div class="health-metric hr">
+            <div class="h-label">Heart Rate</div>
+            <div class="h-val"><span id="hrVal">--</span> <span class="h-unit">bpm</span></div>
+          </div>
+          <div class="health-metric hrv">
+            <div class="h-label">HRV</div>
+            <div class="h-val"><span id="hrvVal">--</span> <span class="h-unit">ms</span></div>
+          </div>
+          <div class="health-metric spo2">
+            <div class="h-label">SpO2</div>
+            <div class="h-val"><span id="spo2Val">--</span> <span class="h-unit">%</span></div>
+          </div>
+          <div class="health-metric accel">
+            <div class="h-label">Accelerometer</div>
+            <div class="h-val" id="accelVal">--</div>
+          </div>
+        </div>
+        <div class="health-alert" id="healthAlert"></div>
       </div>
     </div>
 
@@ -661,6 +789,7 @@ function update(d) {
   // BLE
   document.getElementById("bleName").textContent = d.target_ble || "--";
   document.getElementById("bleDist").textContent = d.ble_distance != null ? d.ble_distance + "m" : "--";
+  document.getElementById("focalVal").textContent = d.focal_initialized ? d.focal_height : "waiting";
   document.getElementById("personCount").textContent = d.persons_detected || 0;
   const tm = d.tracking_mode || "--";
   const tmEl = document.getElementById("trackMode");
@@ -708,6 +837,31 @@ function update(d) {
     fhtml += `<div class="feat-item"><span class="label">${label}</span><span class="val">${display}</span></div>`;
   }
   fg.innerHTML = fhtml;
+
+  // Health data
+  const h = d.health;
+  if (h) {
+    document.getElementById("healthWaiting").style.display = "none";
+    document.getElementById("healthData").style.display = "block";
+    document.getElementById("hrVal").textContent = h.heart_rate != null ? h.heart_rate : "--";
+    document.getElementById("hrvVal").textContent = h.hrv != null ? h.hrv : "--";
+    document.getElementById("spo2Val").textContent = h.spo2 != null ? h.spo2 : "--";
+    const ax = h.accelerometer;
+    if (ax) {
+      document.getElementById("accelVal").textContent =
+        `x:${ax.x.toFixed(1)} y:${ax.y.toFixed(1)} z:${ax.z.toFixed(1)}`;
+    }
+    const alert = document.getElementById("healthAlert");
+    if (h.heart_rate && h.heart_rate >= 120) {
+      alert.className = "health-alert tachycardia";
+      alert.textContent = "\\u26a0 Tachycardia — HR " + h.heart_rate + " bpm";
+    } else if (h.hrv && h.hrv < 20) {
+      alert.className = "health-alert hrv-drop";
+      alert.textContent = "\\u26a0 Low HRV — " + h.hrv + " ms";
+    } else {
+      alert.className = "health-alert";
+    }
+  }
 
   // Joints
   const jg = document.getElementById("jointGrid");
@@ -791,16 +945,17 @@ modalSendReport.addEventListener("click", function() {
   });
 });
 
-// Watch activate / deactivate — toggle UI and call backend
+// Watch activate / deactivate — only the first watch (data-real-watch) calls backend
 document.getElementById("watchList").addEventListener("click", function(e) {
   const btn = e.target.closest(".watch-btn");
   if (!btn) return;
   const item = btn.closest(".watch-item");
+  const isRealWatch = item.getAttribute("data-real-watch") === "true";
   const statusEl = item.querySelector(".watch-status");
   const activateBtn = item.querySelector(".watch-btn.activate");
   const deactivateBtn = item.querySelector(".watch-btn.deactivate");
   if (btn.classList.contains("activate")) {
-    // Deactivate all others, then activate this one
+    // Deactivate all others, then activate this one (UI)
     document.querySelectorAll(".watch-item").forEach(function(w) {
       w.classList.remove("active", "primary");
       w.querySelector(".watch-status").textContent = "Inactive";
@@ -811,14 +966,16 @@ document.getElementById("watchList").addEventListener("click", function(e) {
     statusEl.textContent = "Active";
     activateBtn.classList.add("hidden");
     deactivateBtn.classList.remove("hidden");
-    activate();
+    if (isRealWatch) activate();
   } else if (btn.classList.contains("deactivate")) {
     item.classList.remove("active", "primary");
     statusEl.textContent = "Inactive";
     activateBtn.classList.remove("hidden");
     deactivateBtn.classList.add("hidden");
-    deactivate();
-    openReportModal();
+    if (isRealWatch) {
+      deactivate();
+      openReportModal();
+    }
   }
 });
 </script>

@@ -6,8 +6,8 @@ import '../models/biometric_data.dart';
 import '../models/incident_report.dart';
 
 class ReportService {
-  // TODO: update host to your FastAPI server IP/hostname
-  static const String _baseUrl = 'http://192.168.1.100:8000';
+  // Your computer (backend); Pi is 10.136.28.70
+  static const String _baseUrl = 'http://10.136.4.45:8000';
 
   /// Request a GenAI incident report from the backend.
   Future<IncidentReport> generateReport({

@@ -1,10 +1,9 @@
 import asyncio
 from bleak import BleakScanner
 
-# Target UUID from your Android phone
 TARGET_UUID = "a91c8e72-6b91-4f92-9c9b-6bafcd2e1d13"
+TARGET_NAME = "TARGET_A15"
 
-# RSSI calibration constants
 TX_POWER = -59  # RSSI at 1 meter
 N = 2.5         # Path loss exponent (indoor ~2-3)
 
@@ -14,7 +13,17 @@ def estimate_distance(rssi):
     return max(0.1, min(dist, 30.0))
 
 SCAN_ROUNDS = 5
-SCAN_TIMEOUT = 1  # seconds per round (~5s total)
+SCAN_TIMEOUT = 2  # seconds per round
+
+
+def _is_target(device, adv_data):
+    """Match by service UUID (primary) or device name (fallback)."""
+    uuids = [u.lower() for u in adv_data.service_uuids]
+    if TARGET_UUID.lower() in uuids:
+        return True
+    if device.name and TARGET_NAME in device.name:
+        return True
+    return False
 
 
 async def scan():
@@ -22,15 +31,15 @@ async def scan():
 
     rssi_readings: dict[str, list[int]] = {}
 
-    for i in range(SCAN_ROUNDS):
-        devices = await BleakScanner.discover(timeout=SCAN_TIMEOUT)
-        for device in devices:
-            props = device.details.get('props', {}) if device.details else {}
-            uuids = props.get("UUIDs", [])
-            if TARGET_UUID in uuids:
-                rssi = props.get("RSSI", None)
+    for _ in range(SCAN_ROUNDS):
+        discovered = await BleakScanner.discover(
+            timeout=SCAN_TIMEOUT, return_adv=True
+        )
+        for address, (device, adv_data) in discovered.items():
+            if _is_target(device, adv_data):
+                rssi = adv_data.rssi
                 if rssi is not None:
-                    rssi_readings.setdefault(device.address, []).append(rssi)
+                    rssi_readings.setdefault(address, []).append(rssi)
 
     if not rssi_readings:
         print("Target not detected\n")
@@ -52,6 +61,3 @@ async def scan():
 
     return results
 
-    
-
-        

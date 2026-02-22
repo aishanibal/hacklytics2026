@@ -9,16 +9,24 @@ import android.bluetooth.le.BluetoothLeAdvertiser
 import android.os.Build
 import android.os.Bundle
 import android.os.ParcelUuid
-import java.util.UUID
-import io.flutter.embedding.android.FlutterActivity
+import android.util.Log
 import androidx.core.app.ActivityCompat
+import io.flutter.embedding.android.FlutterFragmentActivity
+import java.util.UUID
 
-class MainActivity : FlutterActivity() {
+/**
+ * Health data (heart rate, HRV, SpO2) and accelerometer are handled by the Flutter
+ * health and sensors_plus packages. This activity only handles BLE advertising
+ * so the Raspberry Pi can discover the phone.
+ */
+class MainActivity : FlutterFragmentActivity() {
+
     private var advertiser: BluetoothLeAdvertiser? = null
     private val UUID_STRING = "a91c8e72-6b91-4f92-9c9b-6bafcd2e1d13"
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+
         if (hasBlePermissions()) {
             startBLE()
         } else {
@@ -41,7 +49,8 @@ class MainActivity : FlutterActivity() {
         grantResults: IntArray
     ) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
-        if (requestCode == REQUEST_BLE && grantResults.isNotEmpty() && grantResults.all { it == android.content.pm.PackageManager.PERMISSION_GRANTED }) {
+        if (requestCode == REQUEST_BLE && grantResults.isNotEmpty() &&
+            grantResults.all { it == android.content.pm.PackageManager.PERMISSION_GRANTED }) {
             startBLE()
         }
     }
@@ -58,12 +67,12 @@ class MainActivity : FlutterActivity() {
     private fun startBLE() {
         val bluetoothAdapter = BluetoothAdapter.getDefaultAdapter()
         if (bluetoothAdapter == null) {
-            android.util.Log.e("MainActivity", "BLE failed: no Bluetooth adapter")
+            Log.e(TAG, "BLE failed: no Bluetooth adapter")
             return
         }
         advertiser = bluetoothAdapter.bluetoothLeAdvertiser
         if (advertiser == null) {
-            android.util.Log.e("MainActivity", "BLE failed: BLE advertising not supported")
+            Log.e(TAG, "BLE failed: BLE advertising not supported")
             return
         }
         bluetoothAdapter.name = "TARGET_A15"
@@ -73,25 +82,27 @@ class MainActivity : FlutterActivity() {
             .setTimeout(0)
             .setTxPowerLevel(AdvertiseSettings.ADVERTISE_TX_POWER_HIGH)
             .build()
-        val data = AdvertiseData.Builder()
-            .setIncludeDeviceName(true)
+        val advData = AdvertiseData.Builder()
+            .setIncludeDeviceName(false)
             .addServiceUuid(ParcelUuid(UUID.fromString(UUID_STRING)))
             .build()
-        advertiser?.startAdvertising(
-            settings,
-            data,
+        val scanResponse = AdvertiseData.Builder()
+            .setIncludeDeviceName(true)
+            .build()
+        advertiser?.startAdvertising(settings, advData, scanResponse,
             object : AdvertiseCallback() {
                 override fun onStartSuccess(settingsInEffect: AdvertiseSettings?) {
-                    android.util.Log.i("MainActivity", "BLE advertising started: TARGET_A15 / $UUID_STRING")
+                    Log.i(TAG, "BLE advertising started: TARGET_A15 / $UUID_STRING")
                 }
                 override fun onStartFailure(errorCode: Int) {
-                    android.util.Log.e("MainActivity", "BLE advertising failed: $errorCode")
+                    Log.e(TAG, "BLE advertising failed: $errorCode")
                 }
             }
         )
     }
 
     companion object {
+        private const val TAG = "MainActivity"
         private const val REQUEST_BLE = 1001
     }
 }

@@ -6,19 +6,29 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../models/alert_payload.dart';
 import '../models/biometric_data.dart';
 import '../services/alert_service.dart';
+import '../services/anomaly_alert_service.dart';
+import '../services/health_push_service.dart';
+import '../services/sensor_service.dart';
 import '../widgets/vital_card.dart';
 import 'camera_screen.dart';
 
-// TODO: wire this provider to SensorService.sensorStream
-final biometricProvider = StreamProvider<BiometricData>((ref) async* {
-  // Placeholder — replace with: ref.read(sensorServiceProvider).sensorStream
-  yield BiometricData(
-    heartRate: 72,
-    spo2: 98.5,
-    stepCount: 4200,
-    skinTemperature: 36.6,
-    timestamp: DateTime.now().millisecondsSinceEpoch,
-  );
+// Backend runs on your computer (not the Pi). Pi = 10.136.28.70, your computer = 10.136.4.45
+const _backendUrl = String.fromEnvironment('BACKEND_URL', defaultValue: 'http://10.136.4.45:8000');
+
+final _sensorService = SensorService();
+final _healthPush = HealthPushService(sensor: _sensorService, backendBaseUrl: _backendUrl);
+final _anomalyAlerts = AnomalyAlertService(backendBaseUrl: _backendUrl);
+
+final biometricProvider = StreamProvider<BiometricData>((ref) {
+  _healthPush.start();
+  ref.onDispose(() => _healthPush.stop());
+  return _sensorService.sensorStream;
+});
+
+final anomalyAlertStateProvider = StreamProvider<AnomalyAlertState>((ref) {
+  _anomalyAlerts.connect();
+  ref.onDispose(() => _anomalyAlerts.disconnect());
+  return _anomalyAlerts.stateStream;
 });
 
 class DashboardScreen extends ConsumerStatefulWidget {
@@ -109,6 +119,7 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
   @override
   Widget build(BuildContext context) {
     final biometricAsync = ref.watch(biometricProvider);
+    final anomalyAsync = ref.watch(anomalyAlertStateProvider);
 
     return Scaffold(
       appBar: AppBar(
@@ -124,10 +135,117 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
           ),
         ],
       ),
-      body: biometricAsync.when(
-        loading: () => const Center(child: CircularProgressIndicator()),
-        error: (err, _) => Center(child: Text('Sensor error: $err')),
-        data: (data) => _DashboardBody(data: data, lastAlert: _lastAlert),
+      body: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          anomalyAsync.when(
+            data: (state) {
+              if (state.error != null) {
+                return _StatusBar(
+                  message: 'Detection server unavailable',
+                  isError: true,
+                );
+              }
+              if (state.anomalyType != null) {
+                return _AnomalyBanner(anomalyType: state.anomalyType!);
+              }
+              // Polling OK, no anomaly right now
+              if (state.hasReceivedMessage) {
+                return const _StatusBar(
+                  message: 'Monitoring for anomalies',
+                  isError: false,
+                );
+              }
+              return const SizedBox.shrink();
+            },
+            loading: () => const _StatusBar(
+              message: 'Connecting to detection server…',
+              isError: false,
+            ),
+            error: (_, __) => const _StatusBar(
+              message: 'Detection server unavailable',
+              isError: true,
+            ),
+          ),
+          Expanded(
+            child: biometricAsync.when(
+              loading: () => const Center(child: CircularProgressIndicator()),
+              error: (err, _) => Center(child: Text('Sensor error: $err')),
+              data: (data) => _DashboardBody(data: data, lastAlert: _lastAlert),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _StatusBar extends StatelessWidget {
+  const _StatusBar({required this.message, required this.isError});
+
+  final String message;
+  final bool isError;
+
+  @override
+  Widget build(BuildContext context) {
+    return Material(
+      color: isError ? Colors.orange.shade900 : Colors.grey.shade800,
+      child: SafeArea(
+        bottom: false,
+        child: Padding(
+          padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 16),
+          child: Row(
+            children: [
+              Icon(
+                isError ? Icons.error_outline : Icons.info_outline,
+                color: Colors.white70,
+                size: 20,
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  message,
+                  style: const TextStyle(color: Colors.white70, fontSize: 13),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _AnomalyBanner extends StatelessWidget {
+  const _AnomalyBanner({required this.anomalyType});
+
+  final String anomalyType;
+
+  @override
+  Widget build(BuildContext context) {
+    return Material(
+      color: Colors.red.shade700,
+      child: SafeArea(
+        bottom: false,
+        child: Padding(
+          padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 16),
+          child: Row(
+            children: [
+              const Icon(Icons.warning_amber_rounded, color: Colors.white),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  'Anomaly detected: $anomalyType',
+                  style: const TextStyle(
+                    color: Colors.white,
+                    fontWeight: FontWeight.bold,
+                    fontSize: 15,
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
       ),
     );
   }
@@ -180,24 +298,24 @@ class _DashboardBody extends StatelessWidget {
                 color: Colors.red,
               ),
               VitalCard(
+                label: 'HRV (RMSSD)',
+                value: data.hrv != null ? '${data.hrv!.toStringAsFixed(0)} ms' : '--',
+                icon: Icons.show_chart,
+                color: Colors.amber,
+              ),
+              VitalCard(
                 label: 'SpO2',
                 value: data.spo2 != null ? '${data.spo2!.toStringAsFixed(1)}%' : '--',
                 icon: Icons.water_drop_outlined,
                 color: Colors.blue,
               ),
               VitalCard(
-                label: 'Steps',
-                value: data.stepCount != null ? '${data.stepCount}' : '--',
-                icon: Icons.directions_walk_outlined,
-                color: Colors.green,
-              ),
-              VitalCard(
-                label: 'Skin Temp',
-                value: data.skinTemperature != null
-                    ? '${data.skinTemperature!.toStringAsFixed(1)}°C'
+                label: 'Accelerometer',
+                value: data.accelX != null
+                    ? '${data.accelX!.toStringAsFixed(1)}, ${data.accelY!.toStringAsFixed(1)}, ${data.accelZ!.toStringAsFixed(1)}'
                     : '--',
-                icon: Icons.thermostat_outlined,
-                color: Colors.orange,
+                icon: Icons.sensors,
+                color: Colors.purple,
               ),
             ],
           ),

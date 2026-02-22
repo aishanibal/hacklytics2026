@@ -5,9 +5,13 @@ import android.os.Build
 import android.os.Bundle
 import android.os.VibrationEffect
 import android.os.Vibrator
+import android.view.WindowManager
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.core.animateDpAsState
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.togetherWith
@@ -17,7 +21,9 @@ import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.height
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.MutableState
@@ -27,6 +33,8 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.res.painterResource
@@ -140,6 +148,15 @@ fun WatchApp(
         }
     }
 
+    val activity = LocalContext.current as? ComponentActivity
+    LaunchedEffect(state) {
+        if (state == WatchState.IDLE) {
+            activity?.window?.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        } else {
+            activity?.window?.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        }
+    }
+
     val backgroundBrush = when (state) {
         WatchState.IDLE -> Brush.verticalGradient(
             colors = listOf(Color.Black, Color(0xFF1B1B1B))
@@ -249,8 +266,22 @@ fun AlertScreen(isRedState: MutableState<Boolean>, onTripleTap: () -> Unit) {
 fun ConfirmedScreen(onDoubleTap: () -> Unit) {
     var tapCount by remember { mutableStateOf(0) }
     var lastTapTime by remember { mutableStateOf(0L) }
+    var animationStarted by remember { mutableStateOf(false) }
 
-    Column(
+    LaunchedEffect(Unit) { animationStarted = true }
+
+    val logoSize by animateDpAsState(
+        targetValue = if (animationStarted) 140.dp else 300.dp,
+        animationSpec = tween(1200),
+        label = "logoShrink"
+    )
+    val textAlpha by animateFloatAsState(
+        targetValue = if (animationStarted) 1f else 0f,
+        animationSpec = tween(800, delayMillis = 600),
+        label = "textFade"
+    )
+
+    Box(
         modifier = Modifier
             .fillMaxSize()
             .pointerInput(Unit) {
@@ -265,9 +296,26 @@ fun ConfirmedScreen(onDoubleTap: () -> Unit) {
                     }
                 }
             },
-        horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.Center
+        contentAlignment = Alignment.Center
     ) {
-        Text("Help is arriving!", fontSize = 22.sp, fontFamily = AppFont, fontWeight = FontWeight.SemiBold, color = AlertRed)
+        Column(
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.Center
+        ) {
+            Image(
+                painter = painterResource(R.drawable.logo),
+                contentDescription = "Logo",
+                modifier = Modifier.size(logoSize),
+                contentScale = ContentScale.FillBounds
+            )
+            Text(
+                "Help is arriving!",
+                fontSize = 16.sp,
+                fontFamily = AppFont,
+                fontWeight = FontWeight.SemiBold,
+                color = White,
+                modifier = Modifier.alpha(textAlpha)
+            )
+        }
     }
 }

@@ -2,7 +2,7 @@ import os
 import asyncio
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from routers import pose_stream, report
+from routers import pose_stream, report, email_report
 
 app = FastAPI(title="Health Anomaly Detection API", version="0.1.0")
 
@@ -16,6 +16,13 @@ app.add_middleware(
 
 app.include_router(pose_stream.router)
 app.include_router(report.router)
+app.include_router(email_report.router)
+
+try:
+    from routers import ai_config
+    app.include_router(ai_config.router)
+except Exception:
+    pass
 
 try:
     from routers import stream

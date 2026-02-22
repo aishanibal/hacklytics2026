@@ -84,8 +84,14 @@ pip install -r requirements.txt
 git clone https://github.com/ifzhang/ByteTrack
 pip install -e ByteTrack/
 
+# From cv_backend directory (so main:app resolves):
 uvicorn main:app --reload --host 0.0.0.0 --port 8000
 ```
+
+- **`--host 0.0.0.0`** — makes the service reachable from other devices on your network (e.g. phone, another PC). Use `localhost` or omit for local-only.
+- **`--port 8000`** — change if 8000 is in use.
+
+Then open the dashboard: **http://localhost:8000/pose/view** (or `http://<this-machine-ip>:8000/pose/view` from another device).
 
 Test the health endpoint:
 ```bash
@@ -118,6 +124,11 @@ Before running, update the backend URL in:
 |---|---|
 | `OPENAI_API_KEY` | OpenAI API key for incident report generation |
 | `INFERENCE_STRIDE` | Process every Nth frame (default: `2`) |
+| `SMTP_HOST` | SMTP server for sending report emails (e.g. `smtp.gmail.com`) |
+| `SMTP_PORT` | SMTP port (default: `587`) |
+| `SMTP_USER` | SMTP login / sender account |
+| `SMTP_PASSWORD` | SMTP password (use app password for Gmail) |
+| `FROM_EMAIL` | Sender address (defaults to `SMTP_USER`) |
 
 ---
 

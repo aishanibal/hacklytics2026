@@ -513,6 +513,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     <h3>Send deactivation report</h3>
     <label for="reportEmail">Email address</label>
     <input type="email" id="reportEmail" placeholder="you@example.com" />
+    <p id="reportModalMessage" style="margin-top:10px;font-size:12px;min-height:18px;color:#7A9E9F"></p>
     <div class="modal-actions">
       <button type="button" class="modal-btn send" id="modalSendReport">Send report</button>
     </div>
@@ -738,6 +739,7 @@ const modalSendReport = document.getElementById("modalSendReport");
 
 function openReportModal() {
   reportEmailInput.value = "";
+  document.getElementById("reportModalMessage").textContent = "";
   reportModal.classList.add("show");
   reportEmailInput.focus();
 }
@@ -749,8 +751,44 @@ reportModal.addEventListener("click", function(e) {
   if (e.target === reportModal) closeReportModal();
 });
 modalSendReport.addEventListener("click", function() {
-  reportEmail = reportEmailInput.value.trim();
-  closeReportModal();
+  var email = reportEmailInput.value.trim();
+  var msgEl = document.getElementById("reportModalMessage");
+  if (!email) {
+    msgEl.textContent = "Please enter an email address.";
+    msgEl.style.color = "#FE5F55";
+    return;
+  }
+  modalSendReport.disabled = true;
+  msgEl.textContent = "Sending...";
+  msgEl.style.color = "#7A9E9F";
+  fetch("/report/send-email", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ email: email })
+  })
+  .then(function(r) {
+    if (r.ok) {
+      msgEl.textContent = "Report sent! Check your inbox.";
+      msgEl.style.color = "#EEFF5D";
+      reportEmail = email;
+      setTimeout(closeReportModal, 1200);
+    } else {
+      return r.json().then(function(d) {
+        msgEl.textContent = d.detail || "Failed to send.";
+        msgEl.style.color = "#FE5F55";
+      }).catch(function() {
+        msgEl.textContent = "Failed to send report.";
+        msgEl.style.color = "#FE5F55";
+      });
+    }
+  })
+  .catch(function() {
+    msgEl.textContent = "Network error. Try again.";
+    msgEl.style.color = "#FE5F55";
+  })
+  .finally(function() {
+    modalSendReport.disabled = false;
+  });
 });
 
 // Watch activate / deactivate — toggle UI and call backend

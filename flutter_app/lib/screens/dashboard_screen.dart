@@ -1,29 +1,12 @@
-import 'dart:async';
-
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
-import '../models/alert_payload.dart';
-import '../models/biometric_data.dart';
-import '../services/alert_service.dart';
 import '../services/anomaly_alert_service.dart';
-import '../services/health_push_service.dart';
-import '../services/sensor_service.dart';
-import '../widgets/vital_card.dart';
-import 'camera_screen.dart';
 
 // Backend runs on your computer (not the Pi). Pi = 10.136.28.70, your computer = 10.136.4.45
 const _backendUrl = String.fromEnvironment('BACKEND_URL', defaultValue: 'http://10.136.4.45:8000');
 
-final _sensorService = SensorService();
-final _healthPush = HealthPushService(sensor: _sensorService, backendBaseUrl: _backendUrl);
 final _anomalyAlerts = AnomalyAlertService(backendBaseUrl: _backendUrl);
-
-final biometricProvider = StreamProvider<BiometricData>((ref) {
-  _healthPush.start();
-  ref.onDispose(() => _healthPush.stop());
-  return _sensorService.sensorStream;
-});
 
 final anomalyAlertStateProvider = StreamProvider<AnomalyAlertState>((ref) {
   _anomalyAlerts.connect();
@@ -31,296 +14,130 @@ final anomalyAlertStateProvider = StreamProvider<AnomalyAlertState>((ref) {
   return _anomalyAlerts.stateStream;
 });
 
-class DashboardScreen extends ConsumerStatefulWidget {
+class DashboardScreen extends ConsumerWidget {
   const DashboardScreen({super.key});
 
   @override
-  ConsumerState<DashboardScreen> createState() => _DashboardScreenState();
-}
-
-class _DashboardScreenState extends ConsumerState<DashboardScreen> {
-  Timer? _alertPollTimer;
-  final AlertService _alertService = AlertService();
-  AlertPayload? _lastAlert;
-  bool _alertDialogShown = false;
-
-  @override
-  void initState() {
-    super.initState();
-    _startAlertPolling();
-  }
-
-  @override
-  void dispose() {
-    _alertPollTimer?.cancel();
-    super.dispose();
-  }
-
-  void _startAlertPolling() {
-    _alertPollTimer = Timer.periodic(const Duration(seconds: 5), (_) async {
-      if (!mounted) return;
-      try {
-        final alert = await _alertService.fetchLatestAlert();
-        if (!mounted) return;
-        setState(() => _lastAlert = alert);
-        if (alert.highAlert && !_alertDialogShown && mounted) {
-          _alertDialogShown = true;
-          _showAlertDialog(alert);
-        }
-      } catch (_) {
-        // Ignore network errors; next poll will retry
-      }
-    });
-  }
-
-  void _showAlertDialog(AlertPayload alert) {
-    showDialog<void>(
-      context: context,
-      barrierDismissible: false,
-      builder: (ctx) => AlertDialog(
-        title: Row(
-          children: [
-            Icon(Icons.warning_amber_rounded, color: Theme.of(context).colorScheme.error, size: 28),
-            const SizedBox(width: 8),
-            const Text('High Alert'),
-          ],
-        ),
-        content: SingleChildScrollView(
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(alert.summary.isNotEmpty ? alert.summary : 'Sensor/pose data suggests attention needed.'),
-              if (alert.symptoms.isNotEmpty) ...[
-                const SizedBox(height: 12),
-                Text('Signs: ${alert.symptoms.join(", ")}', style: Theme.of(context).textTheme.bodySmall),
-              ],
-              if (alert.personId != 'unknown')
-                Padding(
-                  padding: const EdgeInsets.only(top: 8),
-                  child: Text('Person: ${alert.personId}', style: Theme.of(context).textTheme.bodySmall),
-                ),
-            ],
-          ),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () {
-              _alertDialogShown = false;
-              Navigator.of(ctx).pop();
-            },
-            child: const Text('Dismiss'),
-          ),
-        ],
-      ),
-    ).then((_) => _alertDialogShown = false);
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final biometricAsync = ref.watch(biometricProvider);
+  Widget build(BuildContext context, WidgetRef ref) {
     final anomalyAsync = ref.watch(anomalyAlertStateProvider);
 
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Health Monitor'),
-        actions: [
-          IconButton(
-            icon: const Icon(Icons.videocam_outlined),
-            tooltip: 'Open Camera',
-            onPressed: () => Navigator.push(
-              context,
-              MaterialPageRoute(builder: (_) => const CameraScreen()),
-            ),
-          ),
-        ],
+        title: const Text('Anomaly Monitor'),
       ),
-      body: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          anomalyAsync.when(
-            data: (state) {
-              if (state.error != null) {
-                return _StatusBar(
-                  message: 'Detection server unavailable',
-                  isError: true,
-                );
-              }
-              if (state.anomalyType != null) {
-                return _AnomalyBanner(anomalyType: state.anomalyType!);
-              }
-              // Polling OK, no anomaly right now
-              if (state.hasReceivedMessage) {
-                return const _StatusBar(
-                  message: 'Monitoring for anomalies',
-                  isError: false,
-                );
-              }
-              return const SizedBox.shrink();
-            },
-            loading: () => const _StatusBar(
-              message: 'Connecting to detection server…',
-              isError: false,
-            ),
-            error: (_, __) => const _StatusBar(
-              message: 'Detection server unavailable',
-              isError: true,
-            ),
-          ),
-          Expanded(
-            child: biometricAsync.when(
-              loading: () => const Center(child: CircularProgressIndicator()),
-              error: (err, _) => Center(child: Text('Sensor error: $err')),
-              data: (data) => _DashboardBody(data: data, lastAlert: _lastAlert),
-            ),
-          ),
-        ],
+      body: anomalyAsync.when(
+        data: (state) => _AlertPage(state: state),
+        loading: () => const _AlertPage(
+          state: AnomalyAlertState(hasReceivedMessage: false),
+          isLoading: true,
+        ),
+        error: (_, __) => _AlertPage(
+          state: AnomalyAlertState(error: Exception('Connection failed'), hasReceivedMessage: false),
+          isError: true,
+        ),
       ),
     );
   }
 }
 
-class _StatusBar extends StatelessWidget {
-  const _StatusBar({required this.message, required this.isError});
+class _AlertPage extends StatelessWidget {
+  const _AlertPage({
+    required this.state,
+    this.isLoading = false,
+    this.isError = false,
+  });
 
-  final String message;
+  final AnomalyAlertState state;
+  final bool isLoading;
   final bool isError;
 
   @override
   Widget build(BuildContext context) {
-    return Material(
-      color: isError ? Colors.orange.shade900 : Colors.grey.shade800,
-      child: SafeArea(
-        bottom: false,
-        child: Padding(
-          padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 16),
-          child: Row(
-            children: [
-              Icon(
-                isError ? Icons.error_outline : Icons.info_outline,
-                color: Colors.white70,
-                size: 20,
-              ),
-              const SizedBox(width: 8),
-              Expanded(
-                child: Text(
-                  message,
-                  style: const TextStyle(color: Colors.white70, fontSize: 13),
-                ),
-              ),
-            ],
-          ),
-        ),
-      ),
+    if (isError || state.error != null) {
+      return _FullPageStatus(
+        icon: Icons.cloud_off_rounded,
+        message: 'Detection server unavailable',
+        detail: 'Check that the backend is running and reachable.',
+        color: Colors.orange.shade800,
+      );
+    }
+
+    if (isLoading || !state.hasReceivedMessage) {
+      return _FullPageStatus(
+        icon: Icons.hourglass_empty_rounded,
+        message: 'Connecting to detection server…',
+        detail: 'Polling for anomalies.',
+        color: Colors.grey.shade700,
+      );
+    }
+
+    if (state.anomalyType != null && state.anomalyType!.isNotEmpty) {
+      return _FullPageStatus(
+        icon: Icons.warning_amber_rounded,
+        message: 'Anomaly detected',
+        detail: state.anomalyType!,
+        color: Colors.red.shade700,
+      );
+    }
+
+    return _FullPageStatus(
+      icon: Icons.check_circle_outline_rounded,
+      message: 'Monitoring for anomalies',
+      detail: 'No anomaly right now.',
+      color: Colors.green.shade800,
     );
   }
 }
 
-class _AnomalyBanner extends StatelessWidget {
-  const _AnomalyBanner({required this.anomalyType});
+class _FullPageStatus extends StatelessWidget {
+  const _FullPageStatus({
+    required this.icon,
+    required this.message,
+    required this.detail,
+    required this.color,
+  });
 
-  final String anomalyType;
+  final IconData icon;
+  final String message;
+  final String detail;
+  final Color color;
 
   @override
   Widget build(BuildContext context) {
-    return Material(
-      color: Colors.red.shade700,
+    return Container(
+      width: double.infinity,
+      color: color,
       child: SafeArea(
-        bottom: false,
-        child: Padding(
-          padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 16),
-          child: Row(
-            children: [
-              const Icon(Icons.warning_amber_rounded, color: Colors.white),
-              const SizedBox(width: 8),
-              Expanded(
-                child: Text(
-                  'Anomaly detected: $anomalyType',
+        child: Center(
+          child: Padding(
+            padding: const EdgeInsets.all(32),
+            child: Column(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                Icon(icon, size: 80, color: Colors.white),
+                const SizedBox(height: 24),
+                Text(
+                  message,
+                  textAlign: TextAlign.center,
                   style: const TextStyle(
                     color: Colors.white,
+                    fontSize: 24,
                     fontWeight: FontWeight.bold,
-                    fontSize: 15,
                   ),
                 ),
-              ),
-            ],
+                const SizedBox(height: 12),
+                Text(
+                  detail,
+                  textAlign: TextAlign.center,
+                  style: TextStyle(
+                    color: Colors.white.withOpacity(0.9),
+                    fontSize: 16,
+                  ),
+                ),
+              ],
+            ),
           ),
         ),
-      ),
-    );
-  }
-}
-
-class _DashboardBody extends StatelessWidget {
-  const _DashboardBody({required this.data, this.lastAlert});
-
-  final BiometricData data;
-  final AlertPayload? lastAlert;
-
-  @override
-  Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.all(16),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          if (lastAlert != null && lastAlert!.highAlert)
-            Container(
-              width: double.infinity,
-              padding: const EdgeInsets.all(12),
-              margin: const EdgeInsets.only(bottom: 16),
-              decoration: BoxDecoration(
-                color: Theme.of(context).colorScheme.errorContainer,
-                borderRadius: BorderRadius.circular(8),
-              ),
-              child: Row(
-                children: [
-                  Icon(Icons.warning_amber_rounded, color: Theme.of(context).colorScheme.onErrorContainer),
-                  const SizedBox(width: 8),
-                  Expanded(child: Text(lastAlert!.summary.isNotEmpty ? lastAlert!.summary : 'High alert — check details.', style: Theme.of(context).textTheme.bodyMedium)),
-                ],
-              ),
-            ),
-          Text('Live Vitals', style: Theme.of(context).textTheme.headlineSmall),
-          const SizedBox(height: 16),
-          GridView.count(
-            crossAxisCount: 2,
-            shrinkWrap: true,
-            crossAxisSpacing: 12,
-            mainAxisSpacing: 12,
-            childAspectRatio: 1.3,
-            physics: const NeverScrollableScrollPhysics(),
-            children: [
-              VitalCard(
-                label: 'Heart Rate',
-                value: data.heartRate != null ? '${data.heartRate!.toStringAsFixed(0)} bpm' : '--',
-                icon: Icons.favorite_outline,
-                color: Colors.red,
-              ),
-              VitalCard(
-                label: 'HRV (RMSSD)',
-                value: data.hrv != null ? '${data.hrv!.toStringAsFixed(0)} ms' : '--',
-                icon: Icons.show_chart,
-                color: Colors.amber,
-              ),
-              VitalCard(
-                label: 'SpO2',
-                value: data.spo2 != null ? '${data.spo2!.toStringAsFixed(1)}%' : '--',
-                icon: Icons.water_drop_outlined,
-                color: Colors.blue,
-              ),
-              VitalCard(
-                label: 'Accelerometer',
-                value: data.accelX != null
-                    ? '${data.accelX!.toStringAsFixed(1)}, ${data.accelY!.toStringAsFixed(1)}, ${data.accelZ!.toStringAsFixed(1)}'
-                    : '--',
-                icon: Icons.sensors,
-                color: Colors.purple,
-              ),
-            ],
-          ),
-          // TODO: add fl_chart sparklines for each vital once data streams in
-        ],
       ),
     );
   }
